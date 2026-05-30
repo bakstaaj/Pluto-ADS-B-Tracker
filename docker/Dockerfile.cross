@@ -1,0 +1,40 @@
+# Pluto ADS-B Tracker cross-compile image
+# Target: Pluto/Pluto+ ARM Linux userspace
+# Sysroot: ADI PlutoSDR firmware v0.39
+
+FROM debian:bullseye-slim
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update
+RUN apt-get -y install \
+    build-essential \
+    ca-certificates \
+    file \
+    git \
+    make \
+    pkg-config \
+    wget \
+    xz-utils
+
+WORKDIR /opt/toolchains
+
+RUN wget -q https://releases.linaro.org/components/toolchain/binaries/7.5-2019.12/arm-linux-gnueabihf/gcc-linaro-7.5.0-2019.12-x86_64_arm-linux-gnueabihf.tar.xz
+RUN tar -xf gcc-linaro-7.5.0-2019.12-x86_64_arm-linux-gnueabihf.tar.xz
+
+ENV TOOLCHAIN_DIR=/opt/toolchains/gcc-linaro-7.5.0-2019.12-x86_64_arm-linux-gnueabihf
+ENV PATH="${TOOLCHAIN_DIR}/bin:${PATH}"
+ENV CC=arm-linux-gnueabihf-gcc
+ENV HOST=arm-linux-gnueabihf
+
+RUN which arm-linux-gnueabihf-gcc
+RUN arm-linux-gnueabihf-gcc --version
+
+WORKDIR /opt/pluto
+
+RUN wget -q https://github.com/analogdevicesinc/plutosdr-fw/releases/download/v0.39/sysroot-v0.39.tar.gz
+RUN tar -zxf sysroot-v0.39.tar.gz
+
+ENV PLUTO_SYSROOT=/opt/pluto/staging
+
+WORKDIR /work
