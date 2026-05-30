@@ -94,6 +94,45 @@ tr:hover { background: #242424; cursor: pointer; }
   margin-left: 0;
 }
 
+
+#display-settings {
+  margin-top: 10px;
+  padding: 9px 10px;
+  border: 1px solid #31343a;
+  border-radius: 5px;
+  background: #1b1d21;
+  font-size: 12px;
+}
+#display-settings .settings-title {
+  margin-bottom: 7px;
+  color: #ddd;
+  font-size: 13px;
+  font-weight: bold;
+}
+#display-settings .settings-grid {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: 7px 8px;
+}
+#display-settings label {
+  color: #c5c9cf;
+}
+#display-settings select {
+  min-width: 92px;
+  padding: 3px 5px;
+  color: #eee;
+  background: #24272c;
+  border: 1px solid #474b52;
+  border-radius: 4px;
+}
+#display-settings .checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  grid-column: 1 / 3;
+}
+
 </style>
 </head>
 <body>
@@ -110,6 +149,36 @@ tr:hover { background: #242424; cursor: pointer; }
         <button type="button" id="clear-receiver">Clear receiver</button>
       </div>
       <span id="receiver-status">Receiver location not set</span>
+      <div id="display-settings">
+        <div class="settings-title">Map Display</div>
+        <div class="settings-grid">
+          <label class="checkbox-row">
+            <input type="checkbox" id="show-rings" checked>
+            Show range rings
+          </label>
+
+          <label for="ring-max">Ring extent</label>
+          <select id="ring-max">
+            <option value="25">25 nm</option>
+            <option value="50">50 nm</option>
+            <option value="75">75 nm</option>
+            <option value="100">100 nm</option>
+            <option value="150" selected>150 nm</option>
+            <option value="200">200 nm</option>
+          </select>
+
+          <label for="trail-points">Trail history</label>
+          <select id="trail-points">
+            <option value="10">10 points</option>
+            <option value="25">25 points</option>
+            <option value="50">50 points</option>
+            <option value="80" selected>80 points</option>
+            <option value="150">150 points</option>
+            <option value="300">300 points</option>
+          </select>
+        </div>
+      </div>
+
     </div>
     <div id="table-wrap">
       <table>
@@ -147,6 +216,8 @@ const state = {
   receiverMarker: null,
   ringLayers: [],
   settingReceiverLocation: false,
+  showRangeRings: true,
+  ringMaxNm: 150,
   config: {
     InitialLatitude: 38.75,
     InitialLongitude: -105.18,
@@ -271,7 +342,73 @@ function initMap() {
 }
 
 const RECEIVER_STORAGE_KEY = 'plutoAdsBReceiverLocation';
-const RANGE_RINGS_NM = Array.from({ length: 30 }, (_, index) => (index + 1) * 5);
+function rangeRingsNm() {
+  if (!state.showRangeRings) {
+    return [];
+  }
+
+  return Array.from(
+    { length: Math.floor(state.ringMaxNm / 5) },
+    (_, index) => (index + 1) * 5
+  );
+}
+
+const DISPLAY_SETTINGS_STORAGE_KEY = 'plutoAdsBMapDisplaySettingsV1';
+
+function loadDisplaySettings() {
+  try {
+    const saved = window.localStorage.getItem(DISPLAY_SETTINGS_STORAGE_KEY);
+
+    if (saved) {
+      const settings = JSON.parse(saved);
+
+      if (typeof settings.showRangeRings === 'boolean') {
+        state.showRangeRings = settings.showRangeRings;
+      }
+
+      if ([25, 50, 75, 100, 150, 200].includes(Number(settings.ringMaxNm))) {
+        state.ringMaxNm = Number(settings.ringMaxNm);
+      }
+
+      if ([10, 25, 50, 80, 150, 300].includes(Number(settings.trailMaxPoints))) {
+        state.trailMaxPoints = Number(settings.trailMaxPoints);
+      }
+    }
+  } catch (e) {
+    console.log('Unable to load map display settings:', e);
+  }
+
+  document.getElementById('show-rings').checked = state.showRangeRings;
+  document.getElementById('ring-max').value = String(state.ringMaxNm);
+  document.getElementById('trail-points').value = String(state.trailMaxPoints);
+}
+
+function saveDisplaySettings() {
+  try {
+    window.localStorage.setItem(
+      DISPLAY_SETTINGS_STORAGE_KEY,
+      JSON.stringify({
+        showRangeRings: state.showRangeRings,
+        ringMaxNm: state.ringMaxNm,
+        trailMaxPoints: state.trailMaxPoints
+      })
+    );
+  } catch (e) {
+    console.log('Unable to save map display settings:', e);
+  }
+}
+
+function trimExistingTrails() {
+  for (const [id, points] of state.trailPoints.entries()) {
+    while (points.length > state.trailMaxPoints) {
+      points.shift();
+    }
+
+    if (state.trailLayers.has(id)) {
+      state.trailLayers.get(id).setLatLngs(points);
+    }
+  }
+}
 
 function updateReceiverStatus(message = null) {
   const status = document.getElementById('receiver-status');
@@ -286,8 +423,12 @@ function updateReceiverStatus(message = null) {
     return;
   }
 
+  const ringsText = state.showRangeRings
+    ? `Rings: every 5 nm to ${state.ringMaxNm} nm`
+    : 'Rings hidden';
+
   status.textContent =
-    `Receiver: ${state.receiverLocation.lat.toFixed(5)}, ${state.receiverLocation.lon.toFixed(5)} | Rings: every 5 nm to 150 nm`;
+    `Receiver: ${state.receiverLocation.lat.toFixed(5)}, ${state.receiverLocation.lon.toFixed(5)} | ${ringsText}`;
 }
 
 function loadReceiverLocation() {
@@ -360,7 +501,7 @@ function drawReceiverLocation() {
      <div>Longitude: ${state.receiverLocation.lon.toFixed(6)}</div>`
   );
 
-  for (const ringNm of RANGE_RINGS_NM) {
+  for (const ringNm of rangeRingsNm()) {
     const majorRing = ringNm % 25 === 0;
 
     const ring = L.circle(position, {
@@ -676,7 +817,26 @@ async function main() {
   });
 
   loadReceiverLocation();
+  loadDisplaySettings();
   drawReceiverLocation();
+
+  document.getElementById('show-rings').addEventListener('change', event => {
+    state.showRangeRings = event.target.checked;
+    saveDisplaySettings();
+    drawReceiverLocation();
+  });
+
+  document.getElementById('ring-max').addEventListener('change', event => {
+    state.ringMaxNm = Number(event.target.value);
+    saveDisplaySettings();
+    drawReceiverLocation();
+  });
+
+  document.getElementById('trail-points').addEventListener('change', event => {
+    state.trailMaxPoints = Number(event.target.value);
+    saveDisplaySettings();
+    trimExistingTrails();
+  });
 
   await refresh();
   setInterval(refresh, 1000);
