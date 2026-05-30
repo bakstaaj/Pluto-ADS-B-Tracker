@@ -271,7 +271,7 @@ function initMap() {
 }
 
 const RECEIVER_STORAGE_KEY = 'plutoAdsBReceiverLocation';
-const RANGE_RINGS_NM = [25, 50, 100, 150];
+const RANGE_RINGS_NM = Array.from({ length: 30 }, (_, index) => (index + 1) * 5);
 
 function updateReceiverStatus(message = null) {
   const status = document.getElementById('receiver-status');
@@ -287,7 +287,7 @@ function updateReceiverStatus(message = null) {
   }
 
   status.textContent =
-    `Receiver: ${state.receiverLocation.lat.toFixed(5)}, ${state.receiverLocation.lon.toFixed(5)} | Rings: 25 / 50 / 100 / 150 nm`;
+    `Receiver: ${state.receiverLocation.lat.toFixed(5)}, ${state.receiverLocation.lon.toFixed(5)} | Rings: every 5 nm to 150 nm`;
 }
 
 function loadReceiverLocation() {
@@ -361,13 +361,15 @@ function drawReceiverLocation() {
   );
 
   for (const ringNm of RANGE_RINGS_NM) {
+    const majorRing = ringNm % 25 === 0;
+
     const ring = L.circle(position, {
       radius: ringNm * 1852,
-      color: '#30343b',
-      weight: 2,
-      opacity: 0.88,
+      color: majorRing ? '#30343b' : '#444951',
+      weight: majorRing ? 2 : 1,
+      opacity: majorRing ? 0.90 : 0.52,
       fill: false,
-      dashArray: '7 6',
+      dashArray: majorRing ? '7 6' : '3 8',
       interactive: false
     });
 
