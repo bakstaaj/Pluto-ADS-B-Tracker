@@ -45,6 +45,7 @@
 #include <sys/select.h>
 #include <iio.h>
 #include <ad9361.h>
+#include <stdarg.h>
 #include "anet.h"
 #include "incbin.h"
 
@@ -2275,6 +2276,249 @@ char *aircraftsToJson(int *len) {
 	return buf;
 }
 
+
+/* ======================== VRS-compatible JSON output ====================== */
+
+static void vrsAppend(char **buf, char **p, int *buflen, const char *fmt, ...) {
+    while (1) {
+        va_list ap;
+        int n;
+        int used;
+
+        va_start(ap, fmt);
+        n = vsnprintf(*p, *buflen, fmt, ap);
+        va_end(ap);
+
+        if (n < 0) return;
+
+        if (n < *buflen) {
+            *p += n;
+            *buflen -= n;
+            return;
+        }
+
+        used = *p - *buf;
+        *buflen = used + n + 1024;
+        *buf = realloc(*buf, *buflen);
+        if (*buf == NULL) {
+            fprintf(stderr, "Out of memory building VRS JSON\n");
+            exit(1);
+        }
+        *p = *buf + used;
+        *buflen -= used;
+    }
+}
+
+static void vrsTrimCallsign(const char *src, char *dst, int dstlen) {
+    int i, end;
+
+    if (dstlen <= 0) return;
+
+    for (i = 0; i < dstlen - 1 && src[i]; i++) {
+        dst[i] = src[i];
+    }
+    dst[i] = '\0';
+
+    end = strlen(dst) - 1;
+    while (end >= 0 && (dst[end] == ' ' || dst[end] == '\t')) {
+        dst[end] = '\0';
+        end--;
+    }
+}
+
+static void vrsUppercase(const char *src, char *dst, int dstlen) {
+    int i;
+
+    if (dstlen <= 0) return;
+
+    for (i = 0; i < dstlen - 1 && src[i]; i++) {
+        char c = src[i];
+        if (c >= 'a' && c <= 'z') c = c - 'a' + 'A';
+        dst[i] = c;
+    }
+    dst[i] = '\0';
+}
+
+char *vrsAircraftListJson(int *len) {
+    int buflen = 4096;
+    char *buf = malloc(buflen);
+    char *p = buf;
+    struct aircraft *a;
+    long long now = ((long long)time(NULL)) * 1000;
+    int total = 0;
+    int emitted = 0;
+
+    if (buf == NULL) {
+        fprintf(stderr, "Out of memory allocating VRS JSON buffer\n");
+        exit(1);
+    }
+
+    for (a = Modes.aircrafts; a; a = a->next) {
+        total++;
+    }
+
+    vrsAppend(&buf, &p, &buflen,
+        "{"
+        "\"lastDv\":%lld,"
+        "\"totalAc\":%d,"
+        "\"src\":1,"
+        "\"showSil\":false,"
+        "\"showFlg\":false,"
+        "\"showPic\":false,"
+        "\"shtTrlSec\":30,"
+        "\"stm\":%lld,"
+        "\"feeds\":[{\"id\":1,\"name\":\"Pluto+ ADS-B\"}],"
+        "\"srcFeed\":1,"
+        "\"configChanged\":false,"
+        "\"acList\":[",
+        now, total, now);
+
+    for (a = Modes.aircrafts; a; a = a->next) {
+        char call[9];
+        char icao[16];
+        int tsecs = 0;
+        long long pos_time = 0;
+
+        vrsTrimCallsign(a->flight, call, sizeof(call));
+        vrsUppercase(a->hexaddr, icao, sizeof(icao));
+
+        if (a->seen > 0) {
+            tsecs = (int)(time(NULL) - a->seen);
+            if (tsecs < 0) tsecs = 0;
+            pos_time = ((long long)a->seen) * 1000;
+        }
+
+        if (emitted) {
+            vrsAppend(&buf, &p, &buflen, ",");
+        }
+
+        vrsAppend(&buf, &p, &buflen,
+            "{"
+            "\"Id\":%u,"
+            "\"TSecs\":%d,"
+            "\"Rcvr\":1,"
+            "\"Icao\":\"%s\","
+            "\"CMsgs\":%ld",
+            a->addr, tsecs, icao, a->messages);
+
+        if (call[0]) {
+            vrsAppend(&buf, &p, &buflen, ",\"Call\":\"%s\"", call);
+        }
+
+        if (a->altitude != 0) {
+            vrsAppend(&buf, &p, &buflen, ",\"Alt\":%d", a->altitude);
+        }
+
+        if (a->speed != 0) {
+            vrsAppend(&buf, &p, &buflen, ",\"Spd\":%d", a->speed);
+        }
+
+        if (a->track != 0) {
+            vrsAppend(&buf, &p, &buflen, ",\"Trak\":%d", a->track);
+        }
+
+        if (a->lat != 0 && a->lon != 0) {
+            vrsAppend(&buf, &p, &buflen,
+                ",\"Lat\":%.6f,\"Long\":%.6f,\"PosTime\":%lld",
+                a->lat, a->lon, pos_time);
+        }
+
+        vrsAppend(&buf, &p, &buflen, "}");
+        emitted++;
+    }
+
+    vrsAppend(&buf, &p, &buflen, "]}\n");
+    *len = p - buf;
+    return buf;
+}
+
+char *vrsServerConfigJson(int *len) {
+    const char *json =
+        "{"
+        "\"GoogleMapsApiKey\":\"\","
+        "\"InitialDistanceUnit\":\"nm\","
+        "\"InitialHeightUnit\":\"f\","
+        "\"InitialSpeedUnit\":\"kt\","
+        "\"InitialLatitude\":33.0,"
+        "\"InitialLongitude\":-112.0,"
+        "\"InitialMapType\":\"m\","
+        "\"InitialZoom\":7,"
+        "\"MinimumRefreshSeconds\":1,"
+        "\"RefreshSeconds\":1,"
+        "\"UseMarkerLabels\":true,"
+        "\"VrsVersion\":\"Pluto ADS-B Tracker VRS 0.1\","
+        "\"Receivers\":[{\"id\":1,\"name\":\"Pluto+ ADS-B\"}],"
+        "\"TileServerSettings\":{"
+            "\"MapProvider\":0,"
+            "\"IsCustom\":true,"
+            "\"Name\":\"OpenStreetMap\","
+            "\"Url\":\"https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png\","
+            "\"Subdomains\":\"abc\","
+            "\"MinZoom\":1,"
+            "\"MaxZoom\":19,"
+            "\"Attribution\":\"OpenStreetMap\""
+        "}"
+        "}\n";
+
+    char *out = strdup(json);
+    *len = strlen(out);
+    return out;
+}
+
+char *vrsDesktopHtml(int *len) {
+    const char *html =
+        "<!doctype html>"
+        "<html>"
+        "<head>"
+        "<meta charset=\"utf-8\">"
+        "<title>Pluto ADS-B Tracker</title>"
+        "<style>"
+        "body{font-family:Arial,sans-serif;margin:20px;background:#111;color:#eee;}"
+        "h1{margin-bottom:4px;}"
+        ".muted{color:#aaa;margin-top:0;}"
+        "table{border-collapse:collapse;width:100%;margin-top:16px;}"
+        "th,td{border-bottom:1px solid #333;padding:6px 8px;text-align:left;}"
+        "th{background:#222;}"
+        "code{background:#222;padding:2px 4px;border-radius:3px;}"
+        "</style>"
+        "</head>"
+        "<body>"
+        "<h1>Pluto ADS-B Tracker</h1>"
+        "<p class=\"muted\">VRS-compatible aircraft feed: "
+        "<code>/VirtualRadar/AircraftList.json</code></p>"
+        "<div id=\"summary\">Loading...</div>"
+        "<table>"
+        "<thead><tr>"
+        "<th>ICAO</th><th>Call</th><th>Alt</th><th>Speed</th><th>Track</th><th>Lat</th><th>Lon</th><th>Msgs</th><th>Age</th>"
+        "</tr></thead>"
+        "<tbody id=\"rows\"></tbody>"
+        "</table>"
+        "<script>"
+        "async function refresh(){"
+        "try{"
+        "const r=await fetch('/VirtualRadar/AircraftList.json?_=' + Date.now());"
+        "const j=await r.json();"
+        "document.getElementById('summary').textContent='Aircraft tracked: '+j.totalAc+' | Server time: '+new Date(j.stm).toLocaleTimeString();"
+        "const rows=document.getElementById('rows');"
+        "rows.innerHTML='';"
+        "(j.acList||[]).forEach(a=>{"
+        "const tr=document.createElement('tr');"
+        "tr.innerHTML='<td>'+(a.Icao||'')+'</td><td>'+(a.Call||'')+'</td><td>'+(a.Alt||'')+'</td><td>'+(a.Spd||'')+'</td><td>'+(a.Trak||'')+'</td><td>'+(a.Lat||'')+'</td><td>'+(a.Long||'')+'</td><td>'+(a.CMsgs||'')+'</td><td>'+(a.TSecs||0)+'s</td>';"
+        "rows.appendChild(tr);"
+        "});"
+        "}catch(e){document.getElementById('summary').textContent='Error loading aircraft list: '+e;}"
+        "}"
+        "refresh();setInterval(refresh,1000);"
+        "</script>"
+        "</body>"
+        "</html>";
+
+    char *out = strdup(html);
+    *len = strlen(out);
+    return out;
+}
+
+
 #define MODES_CONTENT_TYPE_HTML "text/html;charset=utf-8"
 #define MODES_CONTENT_TYPE_JSON "application/json;charset=utf-8"
 
@@ -2321,11 +2565,19 @@ int handleHTTPRequest(struct client *c) {
 	/* Select the content to send, we have just two so far:
 	 * "/" -> Our map application.
 	 * "/data.json" -> Our ajax request to update planes. */
-	if (strstr(url, "/data.json")) {
-		content = aircraftsToJson(&clen);
-		ctype = MODES_CONTENT_TYPE_JSON;
-	}
-	else {
+	if (strstr(url, "/VirtualRadar/AircraftList.json")) {
+        content = vrsAircraftListJson(&clen);
+        ctype = MODES_CONTENT_TYPE_JSON;
+    } else if (strstr(url, "/VirtualRadar/ServerConfig.json")) {
+        content = vrsServerConfigJson(&clen);
+        ctype = MODES_CONTENT_TYPE_JSON;
+    } else if (strcmp(url, "/VirtualRadar/") == 0 || strstr(url, "/VirtualRadar/desktop.html")) {
+        content = vrsDesktopHtml(&clen);
+        ctype = MODES_CONTENT_TYPE_HTML;
+    } else if (strstr(url, "/data.json")) {
+        content = aircraftsToJson(&clen);
+        ctype = MODES_CONTENT_TYPE_JSON;
+    } else {
 
 		if(ghtmlSize!=0){
 
