@@ -51,6 +51,10 @@ done
 
 cd "$ROOT_DIR"
 
+echo "== Generating embedded web assets =="
+python3 "$ROOT_DIR/tools/generate_web_assets.py"
+echo
+
 if [[ "$REBUILD_IMAGE" -eq 1 ]]; then
   "$ROOT_DIR/tools/build_cross_image.sh"
 elif ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
