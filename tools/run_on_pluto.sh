@@ -25,13 +25,16 @@ if [[ -z "$PLUTO_PASS" ]]; then
   exit 1
 fi
 
+HOST_UTC="$(date -u '+%Y.%m.%d-%H:%M:%S')"
+
 SSH_OPTS=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null)
 SSHPASS=(sshpass -p "$PLUTO_PASS")
 
 echo "Starting Pluto ADS-B Tracker on ${PLUTO_IP}..."
-echo "Browser URL after startup: http://${PLUTO_IP}:8080/"
-echo "Press Ctrl-C to stop the SSH session."
+echo "Passing host UTC time: ${HOST_UTC}"
+echo "Browser URL after startup: http://${PLUTO_IP}:8080/VirtualRadar/"
+echo "Press Ctrl-C to stop."
 echo
 
 "${SSHPASS[@]}" ssh -tt "${SSH_OPTS[@]}" "${PLUTO_USER}@${PLUTO_IP}" \
-  "'${DEPLOY_DIR}/pluto_adsb_tracker' --interactive --net"
+  "'${DEPLOY_DIR}/run_tracker.sh' --host-time-utc '${HOST_UTC}' -- --interactive --net"

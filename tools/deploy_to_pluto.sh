@@ -14,10 +14,16 @@ PLUTO_PASS="${PLUTO_PASS:-}"
 DEPLOY_DIR="${PLUTO_DEPLOY_DIR:-/mnt/jffs2/pluto_adsb_tracker}"
 
 BIN="$ROOT_DIR/dist/pluto_adsb_tracker"
+RUNTIME="$ROOT_DIR/tools/pluto_runtime.sh"
 
 if [[ ! -f "$BIN" ]]; then
   echo "Missing binary: $BIN"
   echo "Run ./tools/build_pluto_v0_39.sh first."
+  exit 1
+fi
+
+if [[ ! -f "$RUNTIME" ]]; then
+  echo "Missing runtime script: $RUNTIME"
   exit 1
 fi
 
@@ -46,10 +52,15 @@ echo
 "${SSHPASS[@]}" scp -O "${SSH_OPTS[@]}" \
   "$BIN" "${PLUTO_USER}@${PLUTO_IP}:${DEPLOY_DIR}/pluto_adsb_tracker.tmp"
 
+"${SSHPASS[@]}" scp -O "${SSH_OPTS[@]}" \
+  "$RUNTIME" "${PLUTO_USER}@${PLUTO_IP}:${DEPLOY_DIR}/run_tracker.sh.tmp"
+
 "${SSHPASS[@]}" ssh "${SSH_OPTS[@]}" "${PLUTO_USER}@${PLUTO_IP}" "
   chmod +x '${DEPLOY_DIR}/pluto_adsb_tracker.tmp' &&
+  chmod +x '${DEPLOY_DIR}/run_tracker.sh.tmp' &&
   mv '${DEPLOY_DIR}/pluto_adsb_tracker.tmp' '${DEPLOY_DIR}/pluto_adsb_tracker' &&
-  ls -lh '${DEPLOY_DIR}/pluto_adsb_tracker'
+  mv '${DEPLOY_DIR}/run_tracker.sh.tmp' '${DEPLOY_DIR}/run_tracker.sh' &&
+  ls -lh '${DEPLOY_DIR}/pluto_adsb_tracker' '${DEPLOY_DIR}/run_tracker.sh'
 "
 
 echo
