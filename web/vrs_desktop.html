@@ -176,6 +176,18 @@ tr:hover { background: #242424; cursor: pointer; }
   margin-top: 10px;
 }
 
+
+/* aircraft-popups-disabled-v1 */
+.plane-label {
+  background: rgba(20, 23, 27, 0.94);
+  border: 1px solid #3b4249;
+  color: #f0f2f4;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: bold;
+}
+
 </style>
 </head>
 <body>
@@ -328,10 +340,14 @@ function refreshMarkerIcons() {
 
 function selectAircraft(id) {
   state.selectedId = id;
+
+  if (state.map) {
+    state.map.closePopup();
+  }
+
   refreshMarkerIcons();
 
   if (state.markers.has(id)) {
-    state.markers.get(id).openPopup();
   }
 }
 
@@ -758,8 +774,8 @@ function updateMarkers(acList) {
     const marker = state.markers.get(id);
     marker.setLatLng([a.Lat, a.Long]);
     marker.setIcon(aircraftIcon(a));
-    marker.bindPopup(popupHtml(a));
-
+    /* Aircraft details appear in the right-side selected panel only. */
+    marker.unbindPopup();
     updateTrail(a);
   }
 
@@ -817,7 +833,6 @@ function updateTable(acList) {
 
       if (hasPosition(a) && state.markers.has(id)) {
         state.map.setView([a.Lat, a.Long], Math.max(state.map.getZoom(), 9));
-        state.markers.get(id).openPopup();
       }
     };
 
@@ -1036,7 +1051,6 @@ main();
 
       const id = String(aircraft.Id);
       if (state.markers && state.markers.has(id)) {
-        state.markers.get(id).openPopup();
       }
     });
 
