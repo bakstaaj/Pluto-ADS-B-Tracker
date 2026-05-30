@@ -13,5 +13,3 @@ dump1090: dump1090.o anet.o
 clean:
 	rm -f *.o dump1090
 
-# Rebuild the HTTP server object whenever the embedded VRS web page changes.
-dump1090.o: generated/vrs_web_assets.h

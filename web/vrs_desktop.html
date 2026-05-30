@@ -36,6 +36,23 @@ html, body { height: 100%; margin: 0; font-family: Arial, sans-serif; background
 #controls button:hover {
   background: #333;
 }
+#controls button.active {
+  background: #005d70;
+  border-color: #00bddd;
+}
+#receiver-status {
+  display: block;
+  margin-top: 8px;
+  font-size: 12px;
+  color: #9da6ad;
+}
+.receiver-site {
+  color: #ffdf4d;
+  font-weight: bold;
+}
+.selected-row {
+  background: #27343a;
+}
 #table-wrap { overflow: auto; flex: 1; }
 table { border-collapse: collapse; width: 100%; font-size: 13px; }
 th, td { border-bottom: 1px solid #2c2c2c; padding: 6px 8px; text-align: left; white-space: nowrap; }
@@ -89,7 +106,10 @@ tr:hover { background: #242424; cursor: pointer; }
       <div id="controls">
         <label><input type="checkbox" id="show-trails" checked> Show trails</label>
         <button type="button" id="clear-trails">Clear trails</button>
+        <button type="button" id="set-receiver">Set receiver</button>
+        <button type="button" id="clear-receiver">Clear receiver</button>
       </div>
+      <span id="receiver-status">Receiver location not set</span>
     </div>
     <div id="table-wrap">
       <table>
@@ -101,6 +121,8 @@ tr:hover { background: #242424; cursor: pointer; }
             <th>Trk</th>
             <th>Msgs</th>
             <th>Age</th>
+            <th>Dist</th>
+            <th>Brg</th>
           </tr>
         </thead>
         <tbody id="rows"></tbody>
@@ -121,6 +143,10 @@ const state = {
   trailLayers: new Map(),
   showTrails: true,
   trailMaxPoints: 80,
+  receiverLocation: null,
+  receiverMarker: null,
+  ringLayers: [],
+  settingReceiverLocation: false,
   config: {
     InitialLatitude: 38.75,
     InitialLongitude: -105.18,
@@ -191,6 +217,12 @@ function selectAircraft(id) {
 }
 
 function popupHtml(a) {
+  const range = distanceAndBearing(a);
+  const rangeHtml = range
+    ? `<div>Distance: ${range.distanceNm.toFixed(1)} nm</div>
+       <div>Bearing: ${range.bearing.toFixed(0)}°</div>`
+    : '';
+
   return `
     <div class="popup-title">${aircraftName(a)}</div>
     <div>ICAO: ${fmt(a.Icao)}</div>
@@ -199,6 +231,7 @@ function popupHtml(a) {
     <div>Track: ${fmt(a.Trak, '°')}</div>
     <div>Messages: ${fmt(a.CMsgs)}</div>
     <div>Age: ${fmt(a.TSecs, 's')}</div>
+    ${rangeHtml}
   `;
 }
 
@@ -226,10 +259,198 @@ function initMap() {
   /*
    * Clicking open map space clears the selection and hides the callsign tag.
    */
-  state.map.on('click', () => {
+  state.map.on('click', event => {
+    if (state.settingReceiverLocation) {
+      finishReceiverSelection(event.latlng);
+      return;
+    }
+
     state.selectedId = null;
     refreshMarkerIcons();
   });
+}
+
+const RECEIVER_STORAGE_KEY = 'plutoAdsBReceiverLocation';
+const RANGE_RINGS_NM = [25, 50, 100, 150];
+
+function updateReceiverStatus(message = null) {
+  const status = document.getElementById('receiver-status');
+
+  if (message) {
+    status.textContent = message;
+    return;
+  }
+
+  if (!state.receiverLocation) {
+    status.textContent = 'Receiver location not set';
+    return;
+  }
+
+  status.textContent =
+    `Receiver: ${state.receiverLocation.lat.toFixed(5)}, ${state.receiverLocation.lon.toFixed(5)} | Rings: 25 / 50 / 100 / 150 nm`;
+}
+
+function loadReceiverLocation() {
+  try {
+    const saved = window.localStorage.getItem(RECEIVER_STORAGE_KEY);
+    if (!saved) return;
+
+    const parsed = JSON.parse(saved);
+
+    if (typeof parsed.lat === 'number' && typeof parsed.lon === 'number') {
+      state.receiverLocation = parsed;
+    }
+  } catch (e) {
+    console.log('Unable to load receiver location:', e);
+  }
+}
+
+function saveReceiverLocation() {
+  try {
+    if (state.receiverLocation) {
+      window.localStorage.setItem(
+        RECEIVER_STORAGE_KEY,
+        JSON.stringify(state.receiverLocation)
+      );
+    } else {
+      window.localStorage.removeItem(RECEIVER_STORAGE_KEY);
+    }
+  } catch (e) {
+    console.log('Unable to save receiver location:', e);
+  }
+}
+
+function removeReceiverLayers() {
+  if (state.receiverMarker) {
+    state.map.removeLayer(state.receiverMarker);
+    state.receiverMarker = null;
+  }
+
+  for (const layer of state.ringLayers) {
+    state.map.removeLayer(layer);
+  }
+
+  state.ringLayers = [];
+}
+
+function drawReceiverLocation() {
+  removeReceiverLayers();
+
+  if (!state.receiverLocation) {
+    updateReceiverStatus();
+    return;
+  }
+
+  const position = [
+    state.receiverLocation.lat,
+    state.receiverLocation.lon
+  ];
+
+  state.receiverMarker = L.circleMarker(position, {
+    radius: 7,
+    color: '#111',
+    weight: 2,
+    fillColor: '#ffdf4d',
+    fillOpacity: 1
+  }).addTo(state.map);
+
+  state.receiverMarker.bindPopup(
+    `<div class="popup-title">Receiver Site</div>
+     <div>Latitude: ${state.receiverLocation.lat.toFixed(6)}</div>
+     <div>Longitude: ${state.receiverLocation.lon.toFixed(6)}</div>`
+  );
+
+  for (const ringNm of RANGE_RINGS_NM) {
+    const ring = L.circle(position, {
+      radius: ringNm * 1852,
+      color: '#ffdf4d',
+      weight: 1,
+      opacity: 0.50,
+      fill: false,
+      dashArray: '5 7',
+      interactive: false
+    });
+
+    ring.addTo(state.map);
+    state.ringLayers.push(ring);
+  }
+
+  updateReceiverStatus();
+}
+
+function beginReceiverSelection() {
+  state.settingReceiverLocation = true;
+  const button = document.getElementById('set-receiver');
+  button.classList.add('active');
+  button.textContent = 'Click map location...';
+  state.map.getContainer().style.cursor = 'crosshair';
+  updateReceiverStatus('Click the map at your receiver antenna location.');
+}
+
+function finishReceiverSelection(latlng) {
+  state.receiverLocation = {
+    lat: latlng.lat,
+    lon: latlng.lng
+  };
+
+  state.settingReceiverLocation = false;
+
+  const button = document.getElementById('set-receiver');
+  button.classList.remove('active');
+  button.textContent = 'Set receiver';
+  state.map.getContainer().style.cursor = '';
+
+  saveReceiverLocation();
+  drawReceiverLocation();
+}
+
+function clearReceiverLocation() {
+  state.settingReceiverLocation = false;
+  state.receiverLocation = null;
+
+  const button = document.getElementById('set-receiver');
+  button.classList.remove('active');
+  button.textContent = 'Set receiver';
+  state.map.getContainer().style.cursor = '';
+
+  saveReceiverLocation();
+  drawReceiverLocation();
+}
+
+function distanceAndBearing(a) {
+  if (!state.receiverLocation || !hasPosition(a)) {
+    return null;
+  }
+
+  const toRad = degrees => degrees * Math.PI / 180;
+  const toDeg = radians => radians * 180 / Math.PI;
+
+  const lat1 = toRad(state.receiverLocation.lat);
+  const lon1 = toRad(state.receiverLocation.lon);
+  const lat2 = toRad(a.Lat);
+  const lon2 = toRad(a.Long);
+
+  const dLat = lat2 - lat1;
+  const dLon = lon2 - lon1;
+
+  const h =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(lat1) * Math.cos(lat2) *
+    Math.sin(dLon / 2) * Math.sin(dLon / 2);
+
+  const distanceNm = 3440.065 * 2 * Math.atan2(Math.sqrt(h), Math.sqrt(1 - h));
+
+  const y = Math.sin(dLon) * Math.cos(lat2);
+  const x =
+    Math.cos(lat1) * Math.sin(lat2) -
+    Math.sin(lat1) * Math.cos(lat2) * Math.cos(dLon);
+
+  const bearing = (toDeg(Math.atan2(y, x)) + 360) % 360;
+
+  return {
+    distanceNm,
+    bearing
+  };
 }
 
 function updateTrail(a) {
@@ -379,6 +600,13 @@ function updateTable(acList) {
     const tr = document.createElement('tr');
     const id = String(a.Id);
     const name = aircraftName(a);
+    const range = distanceAndBearing(a);
+    const distance = range ? `${range.distanceNm.toFixed(1)} nm` : '';
+    const bearing = range ? `${range.bearing.toFixed(0)}°` : '';
+
+    if (id === state.selectedId) {
+      tr.className = 'selected-row';
+    }
 
     tr.innerHTML = `
       <td><span class="callsign">${name}</span><br><span class="muted">${fmt(a.Icao)}</span></td>
@@ -387,11 +615,14 @@ function updateTable(acList) {
       <td>${fmt(a.Trak)}</td>
       <td>${fmt(a.CMsgs)}</td>
       <td>${fmt(a.TSecs, 's')}</td>
+      <td>${fmt(distance)}</td>
+      <td>${fmt(bearing)}</td>
     `;
 
     tr.onclick = () => {
       state.selectedId = id;
       refreshMarkerIcons();
+      updateTable(acList);
 
       if (hasPosition(a) && state.markers.has(id)) {
         state.map.setView([a.Lat, a.Long], Math.max(state.map.getZoom(), 9));
@@ -434,11 +665,280 @@ async function main() {
     clearTrails();
   });
 
+  document.getElementById('set-receiver').addEventListener('click', () => {
+    beginReceiverSelection();
+  });
+
+  document.getElementById('clear-receiver').addEventListener('click', () => {
+    clearReceiverLocation();
+  });
+
+  loadReceiverLocation();
+  drawReceiverLocation();
+
   await refresh();
   setInterval(refresh, 1000);
 }
 
 main();
 </script>
+
+<style>
+.rx-control {
+  background: rgba(18, 18, 18, 0.95);
+  border: 1px solid #555;
+  border-radius: 6px;
+  box-shadow: 0 2px 9px rgba(0,0,0,0.55);
+  color: #eee;
+  font: 13px Arial, sans-serif;
+  min-width: 205px;
+  padding: 10px;
+}
+.rx-control-title {
+  color: #ffdf4d;
+  font-size: 14px;
+  font-weight: bold;
+  margin-bottom: 8px;
+}
+.rx-control-buttons {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+.rx-control button {
+  background: #252525;
+  border: 1px solid #666;
+  border-radius: 4px;
+  color: #eee;
+  cursor: pointer;
+  font-size: 12px;
+  padding: 5px 8px;
+}
+.rx-control button:hover {
+  background: #363636;
+}
+.rx-control button.active {
+  background: #886d00;
+  border-color: #ffdf4d;
+}
+.rx-control-status {
+  color: #ccc;
+  font-size: 11px;
+  line-height: 1.35;
+}
+.rx-ring-label {
+  background: rgba(20,20,20,0.82);
+  border: 1px solid #ffdf4d;
+  border-radius: 3px;
+  box-shadow: none;
+  color: #ffdf4d;
+  font-size: 10px;
+  padding: 1px 4px;
+}
+.rx-ring-label::before {
+  display: none;
+}
+</style>
+
+<script id="receiver-rings-overlay-v1">
+(function () {
+  const STORAGE_KEY = 'plutoAdsBReceiverOverlayLocationV1';
+  const RANGE_RINGS_NM = [25, 50, 100, 150];
+
+  let map = null;
+  let receiverMarker = null;
+  let ringLayers = [];
+  let selecting = false;
+  let setButton = null;
+  let statusElement = null;
+
+  function setStatus(text) {
+    if (statusElement) statusElement.textContent = text;
+  }
+
+  function removeLayers() {
+    if (!map) return;
+
+    if (receiverMarker) {
+      map.removeLayer(receiverMarker);
+      receiverMarker = null;
+    }
+
+    for (const layer of ringLayers) {
+      map.removeLayer(layer);
+    }
+
+    ringLayers = [];
+  }
+
+  function saveLocation(location) {
+    try {
+      if (location) {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(location));
+      } else {
+        localStorage.removeItem(STORAGE_KEY);
+      }
+    } catch (e) {
+      console.log('Receiver location storage failed:', e);
+    }
+  }
+
+  function loadLocation() {
+    try {
+      const saved = localStorage.getItem(STORAGE_KEY);
+      if (!saved) return null;
+
+      const parsed = JSON.parse(saved);
+      if (typeof parsed.lat === 'number' && typeof parsed.lon === 'number') {
+        return parsed;
+      }
+    } catch (e) {
+      console.log('Receiver location load failed:', e);
+    }
+
+    return null;
+  }
+
+  function drawReceiver(location) {
+    removeLayers();
+
+    if (!location) {
+      setStatus('Receiver location not set.');
+      return;
+    }
+
+    const point = [location.lat, location.lon];
+
+    receiverMarker = L.circleMarker(point, {
+      radius: 7,
+      color: '#151515',
+      weight: 2,
+      fillColor: '#ffdf4d',
+      fillOpacity: 1
+    }).addTo(map);
+
+    receiverMarker.bindPopup(
+      '<b>Receiver Site</b><br>' +
+      'Lat: ' + location.lat.toFixed(6) + '<br>' +
+      'Lon: ' + location.lon.toFixed(6)
+    );
+
+    for (const distanceNm of RANGE_RINGS_NM) {
+      const ring = L.circle(point, {
+        radius: distanceNm * 1852,
+        color: '#ffdf4d',
+        weight: 2,
+        opacity: 0.72,
+        fill: false,
+        dashArray: '7 7',
+        interactive: false
+      }).addTo(map);
+
+      ring.bindTooltip(distanceNm + ' nm', {
+        permanent: true,
+        direction: 'right',
+        className: 'rx-ring-label',
+        opacity: 0.90
+      });
+
+      ringLayers.push(ring);
+    }
+
+    setStatus(
+      'Receiver: ' +
+      location.lat.toFixed(5) + ', ' +
+      location.lon.toFixed(5) +
+      ' | Rings: 25 / 50 / 100 / 150 nm'
+    );
+  }
+
+  function startSelection() {
+    selecting = true;
+    setButton.classList.add('active');
+    setButton.textContent = 'Click map...';
+    map.getContainer().style.cursor = 'crosshair';
+    setStatus('Click the map at the receiver antenna location.');
+  }
+
+  function finishSelection(latlng) {
+    const location = {
+      lat: latlng.lat,
+      lon: latlng.lng
+    };
+
+    selecting = false;
+    setButton.classList.remove('active');
+    setButton.textContent = 'Set receiver';
+    map.getContainer().style.cursor = '';
+
+    saveLocation(location);
+    drawReceiver(location);
+  }
+
+  function clearReceiver() {
+    selecting = false;
+    setButton.classList.remove('active');
+    setButton.textContent = 'Set receiver';
+    map.getContainer().style.cursor = '';
+
+    saveLocation(null);
+    drawReceiver(null);
+  }
+
+  function installOverlay() {
+    if (typeof L === 'undefined' ||
+        typeof state === 'undefined' ||
+        !state.map) {
+      window.setTimeout(installOverlay, 250);
+      return;
+    }
+
+    map = state.map;
+
+    const ReceiverControl = L.Control.extend({
+      options: {
+        position: 'topright'
+      },
+
+      onAdd: function () {
+        const panel = L.DomUtil.create('div', 'rx-control');
+        panel.innerHTML =
+          '<div class="rx-control-title">Receiver / Range Rings</div>' +
+          '<div class="rx-control-buttons">' +
+          '  <button type="button" id="rx-overlay-set">Set receiver</button>' +
+          '  <button type="button" id="rx-overlay-clear">Clear</button>' +
+          '</div>' +
+          '<div class="rx-control-status" id="rx-overlay-status">' +
+          'Receiver location not set.' +
+          '</div>';
+
+        L.DomEvent.disableClickPropagation(panel);
+        L.DomEvent.disableScrollPropagation(panel);
+
+        return panel;
+      }
+    });
+
+    new ReceiverControl().addTo(map);
+
+    setButton = document.getElementById('rx-overlay-set');
+    statusElement = document.getElementById('rx-overlay-status');
+
+    setButton.addEventListener('click', startSelection);
+    document.getElementById('rx-overlay-clear').addEventListener('click', clearReceiver);
+
+    map.on('click', function (event) {
+      if (selecting) {
+        finishSelection(event.latlng);
+      }
+    });
+
+    drawReceiver(loadLocation());
+  }
+
+  installOverlay();
+})();
+</script>
+
 </body>
 </html>

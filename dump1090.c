@@ -46,7 +46,6 @@
 #include <iio.h>
 #include <ad9361.h>
 #include <stdarg.h>
-#include "generated/vrs_web_assets.h"
 #include "anet.h"
 #include "incbin.h"
 
@@ -2466,16 +2465,61 @@ char *vrsServerConfigJson(int *len) {
     return out;
 }
 
+#define VRS_DESKTOP_HTML_FILE "/mnt/jffs2/pluto_adsb_tracker/web/vrs_desktop.html"
+
 char *vrsDesktopHtml(int *len) {
-    char *out = malloc(vrs_desktop_html_len + 1);
+    FILE *fp;
+    long size;
+    size_t bytes_read;
+    char *out;
+
+    const char *fallback =
+        "<!doctype html>"
+        "<html><head><meta charset=\"utf-8\">"
+        "<title>Pluto ADS-B Tracker</title></head>"
+        "<body style=\"font-family:Arial,sans-serif;background:#111;color:#eee;padding:30px\">"
+        "<h1>Pluto ADS-B Tracker</h1>"
+        "<p>Unable to load <code>/mnt/jffs2/pluto_adsb_tracker/web/vrs_desktop.html</code>.</p>"
+        "<p>Run the deploy script again to install the web interface.</p>"
+        "</body></html>";
+
+    fp = fopen(VRS_DESKTOP_HTML_FILE, "rb");
+
+    if (fp == NULL) {
+        out = strdup(fallback);
+        *len = strlen(out);
+        return out;
+    }
+
+    if (fseek(fp, 0, SEEK_END) != 0 ||
+        (size = ftell(fp)) < 0 ||
+        fseek(fp, 0, SEEK_SET) != 0) {
+        fclose(fp);
+        out = strdup(fallback);
+        *len = strlen(out);
+        return out;
+    }
+
+    out = malloc((size_t)size + 1);
 
     if (out == NULL) {
+        fclose(fp);
         fprintf(stderr, "Out of memory serving VRS desktop HTML\n");
         exit(1);
     }
 
-    memcpy(out, vrs_desktop_html, vrs_desktop_html_len + 1);
-    *len = (int)vrs_desktop_html_len;
+    bytes_read = fread(out, 1, (size_t)size, fp);
+    fclose(fp);
+
+    if (bytes_read != (size_t)size) {
+        free(out);
+        out = strdup(fallback);
+        *len = strlen(out);
+        return out;
+    }
+
+    out[size] = '\0';
+    *len = (int)size;
     return out;
 }
 
