@@ -12,7 +12,30 @@ html, body { height: 100%; margin: 0; font-family: Arial, sans-serif; background
 #side { display: flex; flex-direction: column; min-width: 360px; border-left: 1px solid #333; background: #151515; }
 #header { padding: 12px 14px; border-bottom: 1px solid #333; }
 #header h1 { font-size: 20px; margin: 0 0 4px 0; }
-#status { color: #aaa; font-size: 13px; }
+#status { color: #aaa; font-size: 13px; margin-bottom: 9px; }
+#controls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 13px;
+  color: #ddd;
+}
+#controls label {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+#controls button {
+  border: 1px solid #444;
+  border-radius: 4px;
+  background: #242424;
+  color: #eee;
+  padding: 4px 9px;
+  cursor: pointer;
+}
+#controls button:hover {
+  background: #333;
+}
 #table-wrap { overflow: auto; flex: 1; }
 table { border-collapse: collapse; width: 100%; font-size: 13px; }
 th, td { border-bottom: 1px solid #2c2c2c; padding: 6px 8px; text-align: left; white-space: nowrap; }
@@ -28,6 +51,32 @@ tr:hover { background: #242424; cursor: pointer; }
   #app { grid-template-columns: 1fr; grid-template-rows: 60% 40%; }
   #side { min-width: 0; border-left: 0; border-top: 1px solid #333; }
 }
+
+/* Directional SVG marker fixes */
+.plane-marker-wrap {
+  position: relative;
+  width: 34px;
+  height: 34px;
+}
+.plane-marker {
+  width: 30px;
+  height: 30px;
+  display: block;
+  transform-origin: 50% 50%;
+  filter: drop-shadow(0 0 3px #000) drop-shadow(0 0 5px #000);
+}
+.plane-marker path {
+  fill: #00d7ff;
+  stroke: #06151a;
+  stroke-width: 1.2;
+}
+.plane-label {
+  position: absolute;
+  left: 27px;
+  top: 7px;
+  margin-left: 0;
+}
+
 </style>
 </head>
 <body>
@@ -37,6 +86,10 @@ tr:hover { background: #242424; cursor: pointer; }
     <div id="header">
       <h1>Pluto ADS-B Tracker</h1>
       <div id="status">Loading aircraft feed...</div>
+      <div id="controls">
+        <label><input type="checkbox" id="show-trails" checked> Show trails</label>
+        <button type="button" id="clear-trails">Clear trails</button>
+      </div>
     </div>
     <div id="table-wrap">
       <table>
@@ -61,8 +114,13 @@ tr:hover { background: #242424; cursor: pointer; }
 const state = {
   map: null,
   markers: new Map(),
+  aircraftById: new Map(),
   selectedId: null,
   initialPlaneCentered: false,
+  trailPoints: new Map(),
+  trailLayers: new Map(),
+  showTrails: true,
+  trailMaxPoints: 80,
   config: {
     InitialLatitude: 38.75,
     InitialLongitude: -105.18,
@@ -84,9 +142,52 @@ function hasPosition(a) {
 }
 
 function markerHtml(a) {
-  const track = Number(a.Trak || 0);
-  const label = aircraftName(a);
-  return `<div style="transform: rotate(${track}deg)" class="plane-marker">✈</div><span class="plane-label">${label}</span>`;
+  /*
+   * This SVG is drawn pointing straight up. On a north-up map:
+   * track 0 = north, 90 = east, 180 = south, 270 = west.
+   */
+  const trackValue = Number(a.Trak);
+  const track = Number.isFinite(trackValue) ? trackValue : 0;
+  const selected = String(a.Id) === state.selectedId;
+  const label = selected
+    ? `<span class="plane-label">${aircraftName(a)}</span>`
+    : '';
+
+  return `
+    <div class="plane-marker-wrap">
+      <svg class="plane-marker" style="transform: rotate(${track}deg)" viewBox="0 0 32 32" aria-hidden="true">
+        <path d="M16 2 L19.4 12.2 L29 17 L29 20 L18.7 17.9 L18 28 L16 31 L14 28 L13.3 17.9 L3 20 L3 17 L12.6 12.2 Z"></path>
+      </svg>
+      ${label}
+    </div>
+  `;
+}
+
+function aircraftIcon(a) {
+  return L.divIcon({
+    className: '',
+    html: markerHtml(a),
+    iconSize: [110, 34],
+    iconAnchor: [16, 16]
+  });
+}
+
+function refreshMarkerIcons() {
+  for (const [id, marker] of state.markers.entries()) {
+    const aircraft = state.aircraftById.get(id);
+    if (aircraft) {
+      marker.setIcon(aircraftIcon(aircraft));
+    }
+  }
+}
+
+function selectAircraft(id) {
+  state.selectedId = id;
+  refreshMarkerIcons();
+
+  if (state.markers.has(id)) {
+    state.markers.get(id).openPopup();
+  }
 }
 
 function popupHtml(a) {
@@ -121,10 +222,97 @@ function initMap() {
     maxZoom: 19,
     attribution: '&copy; OpenStreetMap contributors'
   }).addTo(state.map);
+
+  /*
+   * Clicking open map space clears the selection and hides the callsign tag.
+   */
+  state.map.on('click', () => {
+    state.selectedId = null;
+    refreshMarkerIcons();
+  });
+}
+
+function updateTrail(a) {
+  const id = String(a.Id);
+  const point = [a.Lat, a.Long];
+  const points = state.trailPoints.get(id) || [];
+  const previous = points.length ? points[points.length - 1] : null;
+
+  /*
+   * Only record an actual position change. A visible line requires two
+   * different decoded ADS-B positions from the same aircraft.
+   */
+  if (!previous || previous[0] !== point[0] || previous[1] !== point[1]) {
+    points.push(point);
+
+    while (points.length > state.trailMaxPoints) {
+      points.shift();
+    }
+
+    state.trailPoints.set(id, points);
+  }
+
+  if (points.length < 2) {
+    return;
+  }
+
+  if (!state.trailLayers.has(id)) {
+    const layer = L.polyline(points, {
+      color: '#00d7ff',
+      weight: 3,
+      opacity: 0.90,
+      dashArray: '7 5',
+      lineCap: 'round',
+      lineJoin: 'round',
+      interactive: false
+    });
+
+    state.trailLayers.set(id, layer);
+
+    if (state.showTrails) {
+      layer.addTo(state.map);
+    }
+  } else {
+    state.trailLayers.get(id).setLatLngs(points);
+  }
+}
+
+function removeTrail(id) {
+  if (state.trailLayers.has(id)) {
+    state.map.removeLayer(state.trailLayers.get(id));
+    state.trailLayers.delete(id);
+  }
+
+  state.trailPoints.delete(id);
+}
+
+function setTrailsVisible(visible) {
+  state.showTrails = visible;
+
+  for (const layer of state.trailLayers.values()) {
+    if (visible) {
+      layer.addTo(state.map);
+    } else {
+      state.map.removeLayer(layer);
+    }
+  }
+}
+
+function clearTrails() {
+  for (const layer of state.trailLayers.values()) {
+    state.map.removeLayer(layer);
+  }
+
+  state.trailLayers.clear();
+  state.trailPoints.clear();
 }
 
 function updateMarkers(acList) {
   const seen = new Set();
+
+  state.aircraftById = new Map(
+    acList.map(a => [String(a.Id), a])
+  );
 
   for (const a of acList) {
     if (!hasPosition(a)) continue;
@@ -134,41 +322,45 @@ function updateMarkers(acList) {
 
     /*
      * Center once on the first aircraft with decoded coordinates.
-     * Aircraft detected without a position remain visible in the table,
-     * but do not prevent centering once a valid position is available.
      */
     if (!state.initialPlaneCentered) {
       state.map.setView([a.Lat, a.Long], state.map.getZoom());
       state.initialPlaneCentered = true;
     }
 
-    const icon = L.divIcon({
-      className: '',
-      html: markerHtml(a),
-      iconSize: [90, 28],
-      iconAnchor: [12, 14]
-    });
-
     if (!state.markers.has(id)) {
-      const marker = L.marker([a.Lat, a.Long], { icon });
-      marker.addTo(state.map);
-      marker.on('click', () => {
-        state.selectedId = id;
-        marker.openPopup();
+      const marker = L.marker([a.Lat, a.Long], {
+        icon: aircraftIcon(a),
+        bubblingMouseEvents: false
       });
+
+      marker.addTo(state.map);
+
+      marker.on('click', () => {
+        selectAircraft(id);
+      });
+
       state.markers.set(id, marker);
     }
 
     const marker = state.markers.get(id);
     marker.setLatLng([a.Lat, a.Long]);
-    marker.setIcon(icon);
+    marker.setIcon(aircraftIcon(a));
     marker.bindPopup(popupHtml(a));
+
+    updateTrail(a);
   }
 
   for (const [id, marker] of state.markers.entries()) {
     if (!seen.has(id)) {
       state.map.removeLayer(marker);
       state.markers.delete(id);
+
+      /*
+       * Intentionally retain the trail after an aircraft falls out of the
+       * active feed. This makes completed tracks visible until the user
+       * presses Clear trails or refreshes the page.
+       */
     }
   }
 }
@@ -177,7 +369,11 @@ function updateTable(acList) {
   const rows = document.getElementById('rows');
   rows.innerHTML = '';
 
-  const sorted = [...acList].sort((a, b) => aircraftName(a).localeCompare(aircraftName(b)));
+  const sorted = [...acList].sort((a, b) => {
+    const ac = aircraftName(a);
+    const bc = aircraftName(b);
+    return ac.localeCompare(bc);
+  });
 
   for (const a of sorted) {
     const tr = document.createElement('tr');
@@ -194,8 +390,10 @@ function updateTable(acList) {
     `;
 
     tr.onclick = () => {
+      state.selectedId = id;
+      refreshMarkerIcons();
+
       if (hasPosition(a) && state.markers.has(id)) {
-        state.selectedId = id;
         state.map.setView([a.Lat, a.Long], Math.max(state.map.getZoom(), 9));
         state.markers.get(id).openPopup();
       }
@@ -227,6 +425,15 @@ async function refresh() {
 async function main() {
   await loadConfig();
   initMap();
+
+  document.getElementById('show-trails').addEventListener('change', event => {
+    setTrailsVisible(event.target.checked);
+  });
+
+  document.getElementById('clear-trails').addEventListener('click', () => {
+    clearTrails();
+  });
+
   await refresh();
   setInterval(refresh, 1000);
 }
