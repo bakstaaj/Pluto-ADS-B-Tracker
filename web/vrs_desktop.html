@@ -62,6 +62,7 @@ const state = {
   map: null,
   markers: new Map(),
   selectedId: null,
+  initialPlaneCentered: false,
   config: {
     InitialLatitude: 38.75,
     InitialLongitude: -105.18,
@@ -130,6 +131,16 @@ function updateMarkers(acList) {
 
     const id = String(a.Id);
     seen.add(id);
+
+    /*
+     * Center once on the first aircraft with decoded coordinates.
+     * Aircraft detected without a position remain visible in the table,
+     * but do not prevent centering once a valid position is available.
+     */
+    if (!state.initialPlaneCentered) {
+      state.map.setView([a.Lat, a.Long], state.map.getZoom());
+      state.initialPlaneCentered = true;
+    }
 
     const icon = L.divIcon({
       className: '',
