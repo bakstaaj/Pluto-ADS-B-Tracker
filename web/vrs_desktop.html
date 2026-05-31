@@ -501,6 +501,62 @@ tr:hover { background: #242424; cursor: pointer; }
   text-align: center;
 }
 
+
+/* ui-audio-cleanup-v8 */
+#selected-aircraft-panel-v2 {
+  display: none;
+  margin-top: 10px;
+  padding: 10px;
+  border: 1px solid #36424a;
+  border-radius: 5px;
+  background: #1a2024;
+  font-size: 12px;
+}
+#selected-aircraft-panel-v2.visible {
+  display: block;
+}
+#selected-aircraft-panel-v2 .selected-title {
+  color: #fff;
+  font-size: 15px;
+  font-weight: bold;
+  margin-bottom: 8px;
+}
+#selected-aircraft-panel-v2 .selected-icao {
+  margin-left: 7px;
+  color: #9da6ad;
+  font-size: 12px;
+  font-weight: normal;
+}
+#selected-aircraft-panel-v2 .selected-grid {
+  display: grid;
+  grid-template-columns: auto 1fr auto 1fr;
+  gap: 5px 9px;
+  margin-bottom: 9px;
+}
+#selected-aircraft-panel-v2 .selected-label {
+  color: #858e95;
+}
+#selected-aircraft-panel-v2 .selected-value {
+  color: #e6e9eb;
+  text-align: right;
+}
+#selected-aircraft-panel-v2 .selected-actions {
+  display: flex;
+  gap: 7px;
+}
+#selected-aircraft-panel-v2 button {
+  padding: 4px 9px;
+  border: 1px solid #465058;
+  border-radius: 4px;
+  background: #262e34;
+  color: #eee;
+  cursor: pointer;
+  font-size: 12px;
+}
+#selected-aircraft-panel-v2 button:hover {
+  background: #354048;
+}
+
 </style>
 </head>
 <body>
@@ -727,6 +783,10 @@ function selectAircraft(id) {
   }
 
   refreshMarkerIcons();
+
+  if (typeof window.renderSelectedAircraftDetails === 'function') {
+    window.renderSelectedAircraftDetails();
+  }
 
   if (state.markers.has(id)) {
   }
@@ -1147,7 +1207,20 @@ function updateMarkers(acList) {
 
       marker.addTo(state.map);
 
-      marker.on('click', () => {
+      marker.on('click', event => {
+        if (event && event.originalEvent) {
+          L.DomEvent.stopPropagation(event.originalEvent);
+        }
+
+        selectAircraft(id);
+      });
+
+      marker.on('dblclick', event => {
+        if (event && event.originalEvent) {
+          L.DomEvent.stopPropagation(event.originalEvent);
+          L.DomEvent.preventDefault(event.originalEvent);
+        }
+
         selectAircraft(id);
       });
 
@@ -1468,189 +1541,7 @@ main();
   background: #354048;
 }
 </style>
-
-<script id="selected-aircraft-panel-v1">
-(function () {
-  let installed = false;
-
-  function value(value, suffix) {
-    if (value === undefined || value === null || value === '') {
-      return '—';
-    }
-
-    return String(value) + (suffix || '');
-  }
-
-  function selectedAircraft() {
-    if (typeof state === 'undefined' ||
-        !state.selectedId ||
-        !state.aircraftById) {
-      return null;
-    }
-
-    return state.aircraftById.get(String(state.selectedId)) || null;
-  }
-
-  function installPanel() {
-    if (installed) return true;
-
-    const panel = document.getElementById('airband-panel');
-    const bestButton = document.getElementById('airband-best');
-    const listenButton = document.getElementById('airband-listen');
-    const stopButton = document.getElementById('airband-stop');
-
-    if (!panel ||
-        !bestButton ||
-        !listenButton ||
-        !stopButton ||
-        typeof state === 'undefined') {
-      return false;
-    }
-
-    bestButton.addEventListener('click', function () {
-      if (playbackActive) {
-        actionStatus = 'Stop listening before selecting a different frequency.';
-        render();
-        return;
-      }
-
-      const ranked = rankedChannels();
-
-      if (!ranked.length) {
-        document.getElementById('airband-status').textContent =
-          'Set the receiver location before selecting a nearby frequency.';
-        return;
-      }
-
-      automaticallyChooseBest(ranked, true);
-      render();
-    });
-
-    listenButton.addEventListener('click', function () {
-      startListening();
-    });
-
-    stopButton.addEventListener('click', function () {
-      stopListening();
-    });
-
-    installed = true;
-    updateListenButtons();
-    return true;
-  }
-
-  function render() {
-    if (!installPanel()) return;
-
-    const status = document.getElementById('airband-status');
-    const source = document.getElementById('airband-source');
-    const rows = document.getElementById('airband-rows');
-
-    if (!metadata) {
-      status.textContent = 'FAA frequency database not loaded.';
-      return;
-    }
-
-    const airportList = Array.isArray(metadata.airports)
-      ? metadata.airports.join(', ')
-      : '';
-
-    source.textContent =
-      `FAA NASR effective ${metadata.effective_date || 'unknown'} · ` +
-      `${metadata.record_count || channels.length} channels` +
-      (airportList ? ` · ${airportList}` : '');
-
-    if (!state.receiverLocation) {
-      status.textContent =
-        'Set the receiver location in Options to find nearby airband frequencies.';
-      rows.innerHTML = '';
-      selectedChannel = null;
-      selectedReceiverKey = null;
-      document.getElementById('airband-selected').textContent =
-        'Select a listed frequency.';
-      return;
-    }
-
-    const ranked = rankedChannels();
-    automaticallyChooseBest(ranked, false);
-
-    status.classList.toggle('airband-listening', playbackActive);
-
-    if (actionStatus) {
-      status.textContent = actionStatus;
-    } else if (recommendation) {
-      status.textContent =
-        `Best nearby voice channel: ${recommendation.frequency_mhz.toFixed(3)} MHz AM · ` +
-        `${recommendation.use || 'Published'} · ${channelName(recommendation)}`;
-    } else {
-      status.textContent = 'No nearby VHF frequencies found in the deployed database.';
-    }
-
-    rows.innerHTML = '';
-
-    /*
-     * Show up to 20 closest channels. The recommended channel is highlighted
-     * even when the user selects another channel manually.
-     */
-    for (const channel of ranked.slice(0, 20)) {
-      const tr = document.createElement('tr');
-      const isSelected =
-        selectedChannel &&
-        channelKey(selectedChannel) === channelKey(channel);
-
-      const isRecommended =
-        recommendation &&
-        channelKey(recommendation) === channelKey(channel);
-
-      if (isSelected) {
-        tr.className = 'selected-airband';
-      }
-
-      const star = isRecommended ? '★ ' : '';
-
-      tr.innerHTML = `
-        <td class="airband-frequency">${star}${channel.frequency_mhz.toFixed(3)}</td>
-        <td>${channel.use || channel.facility_type || 'Published'}<br>
-          <span class="muted">${channelName(channel)}</span>
-        </td>
-        <td>${channel.distance_nm.toFixed(1)} nm</td>
-      `;
-
-      tr.addEventListener('click', function () {
-        if (playbackActive) {
-          actionStatus = 'Stop listening before selecting a different frequency.';
-          render();
-          return;
-        }
-
-        selectedReceiverKey = receiverKey();
-        selectChannel(channel, 'manual');
-        render();
-      });
-
-      rows.appendChild(tr);
-    }
-  }
-
-  async function loadData() {
-    try {
-      const response = await fetch(
-        '/VirtualRadar/Airband/Frequencies.json?_=' + Date.now(),
-        { cache: 'no-store' }
-      );
-
-      const data = await response.json();
-
-      metadata = data.metadata || {};
-      channels = data.channels || [];
-
-      if (!channels.length) {
-        actionStatus = metadata.message || 'No airband frequency records are deployed.';
-      }
-
-      render();
-    } catch (error) {
-</script>tadata.message || 'No airband frequency records are deployed.';
+tadata.message || 'No airband frequency records are deployed.';
       }
 
       render();
@@ -1672,10 +1563,10 @@ main();
     audioPumpBusy: false,
     audioNextCursor: null,
     audioScheduledUntil: 0,
-    audioChunkSamples: 32000,
-    audioPrebufferSamples: 64000,
-    audioStartupLeadSeconds: 2.25,
-    audioQueueTargetSeconds: 6.0,
+    audioChunkSamples: 16000,
+    audioPrebufferSamples: 32000,
+    audioStartupLeadSeconds: 0.50,
+    audioQueueTargetSeconds: 3.0,
     lastReceiverKey: '',
     pageIndex: 0,
     pageSize: 10,
@@ -2080,20 +1971,13 @@ main();
       const chunkSamples = stateV3.audioChunkSamples;
 
       /*
-       * Start with a four-second reserve. The Pluto+ / browser connection can
+       * Start with a two-second reserve. The Pluto+ / browser connection can
        * occasionally take longer than real-time to complete a request, so a
        * deeper reserve prevents playback underruns.
        */
       if (stateV3.audioNextCursor === null) {
         if (totalSamples < stateV3.audioPrebufferSamples) {
-          bufferMessage(
-            'Buffering audio... ' +
-            Math.min(
-              100,
-              Math.round(totalSamples / stateV3.audioPrebufferSamples * 100)
-            ) +
-            '%'
-          );
+          bufferMessage('Preparing live audio...');
           return;
         }
 
@@ -2362,6 +2246,173 @@ main();
   }
 
   initialize();
+})();
+</script>
+
+
+<script id="selected-aircraft-panel-v2">
+(function () {
+  let installed = false;
+
+  function value(item, suffix) {
+    if (item === undefined || item === null || item === '') {
+      return '—';
+    }
+    return String(item) + (suffix || '');
+  }
+
+  function currentAircraft() {
+    if (typeof state === 'undefined' ||
+        state.selectedId === null ||
+        state.selectedId === undefined ||
+        !state.aircraftById) {
+      return null;
+    }
+
+    return state.aircraftById.get(String(state.selectedId)) || null;
+  }
+
+  function install() {
+    if (installed) return true;
+
+    const header = document.getElementById('header');
+    if (!header) return false;
+
+    const panel = document.createElement('div');
+    panel.id = 'selected-aircraft-panel-v2';
+    panel.innerHTML = `
+      <div class="selected-title">
+        <span id="selected-v2-call"></span>
+        <span class="selected-icao" id="selected-v2-icao"></span>
+      </div>
+      <div class="selected-grid">
+        <span class="selected-label">Altitude</span>
+        <span class="selected-value" id="selected-v2-alt"></span>
+        <span class="selected-label">Speed</span>
+        <span class="selected-value" id="selected-v2-spd"></span>
+
+        <span class="selected-label">Track</span>
+        <span class="selected-value" id="selected-v2-track"></span>
+        <span class="selected-label">Messages</span>
+        <span class="selected-value" id="selected-v2-msgs"></span>
+
+        <span class="selected-label">Distance</span>
+        <span class="selected-value" id="selected-v2-dist"></span>
+        <span class="selected-label">Bearing</span>
+        <span class="selected-value" id="selected-v2-bearing"></span>
+
+        <span class="selected-label">Last seen</span>
+        <span class="selected-value" id="selected-v2-age"></span>
+      </div>
+      <div class="selected-actions">
+        <button type="button" id="selected-v2-center">Center Aircraft</button>
+        <button type="button" id="selected-v2-clear">Clear Selection</button>
+      </div>
+    `;
+
+    const coverage = document.getElementById('coverage-summary');
+    if (coverage && coverage.parentNode === header) {
+      header.insertBefore(panel, coverage);
+    } else {
+      header.appendChild(panel);
+    }
+
+    document.getElementById('selected-v2-center').addEventListener('click', function () {
+      const aircraft = currentAircraft();
+
+      if (!aircraft ||
+          typeof aircraft.Lat !== 'number' ||
+          typeof aircraft.Long !== 'number' ||
+          typeof state === 'undefined' ||
+          !state.map) {
+        return;
+      }
+
+      state.map.setView(
+        [aircraft.Lat, aircraft.Long],
+        Math.max(state.map.getZoom(), 10)
+      );
+    });
+
+    document.getElementById('selected-v2-clear').addEventListener('click', function () {
+      if (typeof state !== 'undefined') {
+        state.selectedId = null;
+
+        if (typeof refreshMarkerIcons === 'function') {
+          refreshMarkerIcons();
+        }
+
+        if (state.map) {
+          state.map.closePopup();
+        }
+      }
+
+      render();
+    });
+
+    installed = true;
+    return true;
+  }
+
+  function render() {
+    if (!install()) return;
+
+    const panel = document.getElementById('selected-aircraft-panel-v2');
+    const aircraft = currentAircraft();
+
+    if (!aircraft) {
+      panel.classList.remove('visible');
+      return;
+    }
+
+    const range =
+      typeof distanceAndBearing === 'function'
+        ? distanceAndBearing(aircraft)
+        : null;
+
+    document.getElementById('selected-v2-call').textContent =
+      aircraft.Call || aircraft.Icao || String(aircraft.Id);
+
+    document.getElementById('selected-v2-icao').textContent =
+      aircraft.Icao || '';
+
+    document.getElementById('selected-v2-alt').textContent =
+      value(aircraft.Alt, ' ft');
+
+    document.getElementById('selected-v2-spd').textContent =
+      value(aircraft.Spd, ' kt');
+
+    document.getElementById('selected-v2-track').textContent =
+      value(aircraft.Trak, '°');
+
+    document.getElementById('selected-v2-msgs').textContent =
+      value(aircraft.CMsgs, '');
+
+    document.getElementById('selected-v2-age').textContent =
+      value(aircraft.TSecs, ' s');
+
+    document.getElementById('selected-v2-dist').textContent =
+      range ? range.distanceNm.toFixed(1) + ' nm' : '—';
+
+    document.getElementById('selected-v2-bearing').textContent =
+      range ? range.bearing.toFixed(0) + '°' : '—';
+
+    panel.classList.add('visible');
+  }
+
+  window.renderSelectedAircraftDetails = render;
+
+  function start() {
+    if (!install()) {
+      window.setTimeout(start, 200);
+      return;
+    }
+
+    render();
+    window.setInterval(render, 200);
+  }
+
+  start();
 })();
 </script>
 
