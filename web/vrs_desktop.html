@@ -473,6 +473,34 @@ tr:hover { background: #242424; cursor: pointer; }
   margin-bottom: 5px;
 }
 
+
+/* airband-pagination-v7 */
+#airband-v3-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 7px;
+  margin-top: 8px;
+}
+#airband-v3-pagination button {
+  padding: 4px 9px;
+  border: 1px solid #465058;
+  border-radius: 4px;
+  background: #262e34;
+  color: #eee;
+  cursor: pointer;
+  font-size: 11px;
+}
+#airband-v3-pagination button:disabled {
+  color: #707880;
+  cursor: default;
+}
+#airband-v3-page-info {
+  color: #9da6ad;
+  font-size: 11px;
+  text-align: center;
+}
+
 </style>
 </head>
 <body>
@@ -525,6 +553,12 @@ tr:hover { background: #242424; cursor: pointer; }
                 </thead>
                 <tbody id="airband-v3-rows"></tbody>
               </table>
+            </div>
+
+            <div id="airband-v3-pagination">
+              <button type="button" id="airband-v3-prev">Previous</button>
+              <span id="airband-v3-page-info">Page 1 of 1</span>
+              <button type="button" id="airband-v3-next">Next</button>
             </div>
 
             <div id="airband-v3-selected">Select a frequency.</div>
@@ -1642,7 +1676,10 @@ main();
     audioPrebufferSamples: 64000,
     audioStartupLeadSeconds: 2.25,
     audioQueueTargetSeconds: 6.0,
-    lastReceiverKey: ''
+    lastReceiverKey: '',
+    pageIndex: 0,
+    pageSize: 10,
+    pagingReceiverKey: ''
   };
 
   function element(id) {
@@ -1790,11 +1827,51 @@ main();
   function renderRows() {
     const rows = element('airband-v3-rows');
     const list = preparedChannels();
+    const currentReceiverKey = receiverKey();
+
+    /*
+     * airband-pagination-v7
+     *
+     * Changing receiver coordinates changes distance ordering, so restart
+     * pagination at the closest records.
+     */
+    if (stateV3.pagingReceiverKey !== currentReceiverKey) {
+      stateV3.pageIndex = 0;
+      stateV3.pagingReceiverKey = currentReceiverKey;
+    }
 
     chooseBest(list);
+
+    const totalRecords = list.length;
+    const pageCount = Math.max(1, Math.ceil(totalRecords / stateV3.pageSize));
+
+    if (stateV3.pageIndex >= pageCount) {
+      stateV3.pageIndex = pageCount - 1;
+    }
+
+    if (stateV3.pageIndex < 0) {
+      stateV3.pageIndex = 0;
+    }
+
+    const startIndex = stateV3.pageIndex * stateV3.pageSize;
+    const endIndex = Math.min(startIndex + stateV3.pageSize, totalRecords);
+    const visible = list.slice(startIndex, endIndex);
+
     rows.innerHTML = '';
 
-    const visible = receiver() ? list.slice(0, 30) : list.slice(0, 60);
+    const pageInfo = element('airband-v3-page-info');
+    const previous = element('airband-v3-prev');
+    const next = element('airband-v3-next');
+
+    if (totalRecords) {
+      pageInfo.textContent =
+        `${startIndex + 1}-${endIndex} of ${totalRecords} · Page ${stateV3.pageIndex + 1} of ${pageCount}`;
+    } else {
+      pageInfo.textContent = 'No frequencies';
+    }
+
+    previous.disabled = stateV3.pageIndex === 0;
+    next.disabled = stateV3.pageIndex >= pageCount - 1;
 
     visible.forEach(channel => {
       const row = document.createElement('tr');
@@ -2241,11 +2318,41 @@ main();
       }
 
       stateV3.selected = stateV3.recommended;
+
+      const recommendedIndex = list.findIndex(channel =>
+        key(channel) === key(stateV3.recommended)
+      );
+
+      if (recommendedIndex >= 0) {
+        stateV3.pageIndex = Math.floor(
+          recommendedIndex / stateV3.pageSize
+        );
+      }
+
       renderRows();
     });
 
     element('airband-v3-listen').addEventListener('click', beginListening);
     element('airband-v3-stop').addEventListener('click', endListening);
+
+    element('airband-v3-prev').addEventListener('click', function () {
+      if (stateV3.pageIndex > 0) {
+        stateV3.pageIndex--;
+        renderRows();
+      }
+    });
+
+    element('airband-v3-next').addEventListener('click', function () {
+      const pageCount = Math.max(
+        1,
+        Math.ceil(preparedChannels().length / stateV3.pageSize)
+      );
+
+      if (stateV3.pageIndex < pageCount - 1) {
+        stateV3.pageIndex++;
+        renderRows();
+      }
+    });
 
     loadFrequencies();
 
