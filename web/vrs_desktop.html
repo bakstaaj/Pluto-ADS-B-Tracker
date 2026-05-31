@@ -569,6 +569,27 @@ tr:hover { background: #242424; cursor: pointer; }
   border-color: #ffdf4d;
 }
 
+/* airband-am-adjustable-squelch-v25 */
+#airband-v3-squelch {
+  display: none;
+  align-items: center;
+  gap: 5px;
+  color: #c5cbd0;
+  font-size: 11px;
+  white-space: nowrap;
+}
+#airband-v3-squelch.visible {
+  display: inline-flex;
+}
+#airband-v3-squelch input[type="range"] {
+  width: 82px;
+  accent-color: #ffdf4d;
+}
+#airband-v3-squelch-value {
+  min-width: 28px;
+  color: #ffdf4d;
+  text-align: right;
+}
 
 /* coverage-summary-removed-v11 */
 </style>
@@ -595,6 +616,11 @@ tr:hover { background: #242424; cursor: pointer; }
                       title="Stop listening and resume ADS-B"
                       aria-label="Stop listening and resume ADS-B"
                       disabled>■</button>
+              <label id="airband-v3-squelch" title="AM squelch: raise until idle-channel hum mutes without clipping transmissions">
+                Sq
+                <input type="range" id="airband-v3-squelch-slider" min="0" max="100" step="1" value="48">
+                <span id="airband-v3-squelch-value">Off</span>
+              </label>
             </div>
             <div id="airband-v3-source"></div>
 
@@ -1539,7 +1565,9 @@ tadata.message || 'No airband frequency records are deployed.';
     lastReceiverKey: '',
     pageIndex: 0,
     pageSize: 10,
-    pagingReceiverKey: ''
+    pagingReceiverKey: '',
+    amSquelchLevel: Number(window.localStorage.getItem('plutoAdsBAmSquelchV2') || 48),
+    squelchTimer: null
   };
 
   function element(id) {
@@ -1693,6 +1721,39 @@ tadata.message || 'No airband frequency records are deployed.';
     }
   }
 
+  function showAmSquelch(active) {
+    const control = element('airband-v3-squelch');
+    if (!control) return;
+    control.classList.toggle('visible', !!active);
+  }
+
+  function renderAmSquelch() {
+    const slider = element('airband-v3-squelch-slider');
+    const value = element('airband-v3-squelch-value');
+    if (!slider || !value) return;
+    slider.value = String(stateV3.amSquelchLevel);
+    value.textContent = stateV3.amSquelchLevel > 0
+      ? String(stateV3.amSquelchLevel)
+      : 'Off';
+  }
+
+  async function setAmSquelch(level) {
+    stateV3.amSquelchLevel = Math.max(0, Math.min(100, Number(level) || 0));
+    window.localStorage.setItem('plutoAdsBAmSquelchV2', String(stateV3.amSquelchLevel));
+    renderAmSquelch();
+
+    try {
+      await fetch(
+        '/VirtualRadar/Airband/Squelch.json?level=' +
+        encodeURIComponent(stateV3.amSquelchLevel) +
+        '&_=' + Date.now(),
+        { cache: 'no-store' }
+      );
+    } catch (error) {
+      console.log('Unable to update AM squelch:', error);
+    }
+  }
+
   function status(message, listening) {
     const output = element('airband-v3-status');
     const inlineStop = element('airband-v3-inline-stop');
@@ -1704,6 +1765,10 @@ tadata.message || 'No airband frequency records are deployed.';
       inlineStop.classList.toggle('visible', !!listening);
       inlineStop.disabled = !listening;
     }
+
+    showAmSquelch(
+      !!listening && !!stateV3.selected && demodulation(stateV3.selected) === 'AM'
+    );
   }
 
   function renderSelected() {
@@ -2195,6 +2260,10 @@ tadata.message || 'No airband frequency records are deployed.';
         return;
       }
 
+      if (demodulation(stateV3.selected) === 'AM') {
+        await setAmSquelch(stateV3.amSquelchLevel);
+      }
+
       stateV3.listening = true;
       stateV3.audioNextCursor = null;
 
@@ -2279,6 +2348,16 @@ tadata.message || 'No airband frequency records are deployed.';
     element('airband-v3-listen').addEventListener('click', beginListening);
     element('airband-v3-stop').addEventListener('click', endListening);
     element('airband-v3-inline-stop').addEventListener('click', endListening);
+
+    renderAmSquelch();
+    element('airband-v3-squelch-slider').addEventListener('input', function (event) {
+      stateV3.amSquelchLevel = Number(event.target.value) || 0;
+      renderAmSquelch();
+      clearTimeout(stateV3.squelchTimer);
+      stateV3.squelchTimer = setTimeout(function () {
+        setAmSquelch(stateV3.amSquelchLevel);
+      }, 80);
+    });
 
     element('airband-v3-prev').addEventListener('click', function () {
       if (stateV3.pageIndex > 0) {
