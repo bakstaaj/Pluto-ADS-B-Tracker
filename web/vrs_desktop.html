@@ -374,6 +374,17 @@ tr:hover { background: #242424; cursor: pointer; }
 .airband-v3-star {
   color: #ffdf4d;
 }
+/* noaa-weather-nfm-v12: NOAA channels remain above distance-ranked airband rows. */
+#airband-v3-table tr.noaa-weather {
+  background: #1c2932;
+}
+#airband-v3-table tr.noaa-weather:hover {
+  background: #263843;
+}
+.airband-v3-noaa-label {
+  color: #7dd3fc;
+  font-weight: bold;
+}
 #airband-v3-selected {
   margin-top: 8px;
   color: #d9dde0;
@@ -576,7 +587,7 @@ tr:hover { background: #242424; cursor: pointer; }
         <summary>Options</summary>
         <div id="options-panel-body">
           <section id="airband-panel-v3">
-            <div class="airband-v3-title">Airband Listen</div>
+            <div class="airband-v3-title">Airband / NOAA Weather Listen</div>
             <div id="airband-v3-status-line">
               <span id="airband-v3-status">Loading airband frequency data...</span>
               <button type="button"
@@ -592,7 +603,7 @@ tr:hover { background: #242424; cursor: pointer; }
                 <thead>
                   <tr>
                     <th>Freq</th>
-                    <th>Use / Airport</th>
+                    <th>Use / Mode</th>
                     <th>Dist</th>
                   </tr>
                 </thead>
@@ -611,7 +622,7 @@ tr:hover { background: #242424; cursor: pointer; }
             <div id="airband-v3-audio-area">
               <div id="airband-v3-buffer-status">Preparing audio buffer...</div>
               <div class="airband-v3-note">
-                Buffered live AM playback is active. Audio begins after a short startup buffer.
+                Buffered live playback is active. Audio begins after a short startup buffer.
               </div>
             </div>
 
@@ -1534,6 +1545,7 @@ tadata.message || 'No airband frequency records are deployed.';
   function key(channel) {
     if (!channel) return '';
     return [
+      channel.category || '',
       channel.airport_code || '',
       channel.frequency_hz || '',
       channel.use || '',
@@ -1547,6 +1559,15 @@ tadata.message || 'No airband frequency records are deployed.';
       channel.facility_name ||
       channel.city ||
       'Unknown';
+  }
+
+  function isNoaaWeather(channel) {
+    return !!channel &&
+      (channel.category === 'NOAA_WEATHER' || channel.pinned === true);
+  }
+
+  function demodulation(channel) {
+    return String((channel && channel.demodulation) || 'AM').toUpperCase();
   }
 
   function priority(channel) {
@@ -1564,42 +1585,68 @@ tadata.message || 'No airband frequency records are deployed.';
 
   function preparedChannels() {
     const site = receiver();
-    const result = stateV3.channels.map(channel => {
+    const pinned = [];
+    const ranked = [];
+
+    stateV3.channels.forEach(channel => {
       const value = Object.assign({}, channel);
       value.priority = priority(value);
-      if (site) {
-        value.distance_nm = distanceNm(site.lat, site.lon, value.lat, value.lon);
+
+      if (
+        site &&
+        typeof value.lat === 'number' &&
+        typeof value.lon === 'number' &&
+        Number.isFinite(value.lat) &&
+        Number.isFinite(value.lon)
+      ) {
+        value.distance_nm = distanceNm(
+          site.lat,
+          site.lon,
+          value.lat,
+          value.lon
+        );
       }
-      return value;
+
+      if (isNoaaWeather(value)) {
+        pinned.push(value);
+      } else {
+        ranked.push(value);
+      }
     });
 
+    pinned.sort((a, b) => a.frequency_mhz - b.frequency_mhz);
+
     if (site) {
-      result.sort((a, b) =>
-        a.distance_nm - b.distance_nm ||
+      ranked.sort((a, b) =>
+        (Number.isFinite(a.distance_nm) ? a.distance_nm : Number.MAX_VALUE) -
+          (Number.isFinite(b.distance_nm) ? b.distance_nm : Number.MAX_VALUE) ||
         a.priority - b.priority ||
         a.frequency_mhz - b.frequency_mhz
       );
     } else {
-      result.sort((a, b) =>
+      ranked.sort((a, b) =>
         String(a.airport_code || '').localeCompare(String(b.airport_code || '')) ||
         a.priority - b.priority ||
         a.frequency_mhz - b.frequency_mhz
       );
     }
 
-    return result;
+    return pinned.concat(ranked);
   }
 
   function chooseBest(list) {
     const site = receiver();
+    const rankedAirband = list.filter(channel => !isNoaaWeather(channel));
 
-    if (!site || !list.length) {
+    if (!site || !rankedAirband.length) {
       stateV3.recommended = null;
       return;
     }
 
-    const nearestAirport = list[0].airport_code || list[0].facility_id;
-    const nearbyAirportChannels = list.filter(channel =>
+    const nearestAirport =
+      rankedAirband[0].airport_code || rankedAirband[0].facility_id;
+
+    const nearbyAirportChannels = rankedAirband.filter(channel =>
       (channel.airport_code || channel.facility_id) === nearestAirport
     );
 
@@ -1608,7 +1655,7 @@ tadata.message || 'No airband frequency records are deployed.';
       a.frequency_mhz - b.frequency_mhz
     );
 
-    stateV3.recommended = nearbyAirportChannels[0] || list[0];
+    stateV3.recommended = nearbyAirportChannels[0] || rankedAirband[0];
 
     if (!stateV3.selected || stateV3.lastReceiverKey !== receiverKey()) {
       stateV3.selected = stateV3.recommended;
@@ -1644,7 +1691,8 @@ tadata.message || 'No airband frequency records are deployed.';
 
     output.textContent =
       'Selected: ' +
-      stateV3.selected.frequency_mhz.toFixed(3) + ' MHz AM · ' +
+      stateV3.selected.frequency_mhz.toFixed(3) + ' MHz ' +
+      demodulation(stateV3.selected) + ' · ' +
       (stateV3.selected.use || 'Published') + ' · ' +
       airport(stateV3.selected) +
       distance;
@@ -1704,7 +1752,8 @@ tadata.message || 'No airband frequency records are deployed.';
       const isSelected = stateV3.selected && key(stateV3.selected) === key(channel);
       const isRecommended = stateV3.recommended && key(stateV3.recommended) === key(channel);
 
-      if (isSelected) row.className = 'selected';
+      if (isSelected) row.classList.add('selected');
+      if (isNoaaWeather(channel)) row.classList.add('noaa-weather');
 
       const frequencyCell = document.createElement('td');
       frequencyCell.className = 'airband-v3-frequency';
@@ -1713,7 +1762,14 @@ tadata.message || 'No airband frequency records are deployed.';
         channel.frequency_mhz.toFixed(3);
 
       const useCell = document.createElement('td');
-      useCell.textContent = (channel.use || 'Published') + ' / ' + airport(channel);
+      if (isNoaaWeather(channel)) {
+        useCell.innerHTML =
+          '<span class="airband-v3-noaa-label">NOAA Weather</span> · NFM';
+      } else {
+        useCell.textContent =
+          (channel.use || 'Published') + ' · ' + demodulation(channel) +
+          ' / ' + airport(channel);
+      }
 
       const distanceCell = document.createElement('td');
       distanceCell.textContent =
@@ -1725,7 +1781,9 @@ tadata.message || 'No airband frequency records are deployed.';
       row.appendChild(useCell);
       row.appendChild(distanceCell);
 
-      row.title = 'Double-click to listen';
+      row.title = isNoaaWeather(channel)
+        ? 'NOAA Weather Radio (NFM) - double-click to listen'
+        : 'Double-click to listen';
 
       row.addEventListener('click', function () {
         if (stateV3.listening) {
@@ -1771,7 +1829,7 @@ tadata.message || 'No airband frequency records are deployed.';
       status(
         'Recommended: ' +
         stateV3.recommended.frequency_mhz.toFixed(3) +
-        ' MHz AM · ' +
+        ' MHz ' + demodulation(stateV3.recommended) + ' · ' +
         (stateV3.recommended.use || 'Published') +
         ' · ' +
         airport(stateV3.recommended),
@@ -1800,9 +1858,16 @@ tadata.message || 'No airband frequency records are deployed.';
         ? stateV3.metadata.airports.join(', ')
         : '';
 
+      const noaaCount = Number(stateV3.metadata.noaa_weather_record_count || 0);
+      const airbandCount = Number(
+        stateV3.metadata.airband_record_count ||
+        Math.max(0, stateV3.channels.length - noaaCount)
+      );
+
       element('airband-v3-source').textContent =
-        'FAA NASR ' + (stateV3.metadata.effective_date || '') +
-        ' · ' + stateV3.channels.length + ' channels' +
+        'NOAA Weather ' + noaaCount + ' pinned · FAA NASR ' +
+        (stateV3.metadata.effective_date || '') + ' · ' +
+        airbandCount + ' airband channels' +
         (airports ? ' · ' + airports : '');
 
       renderRows();
@@ -1888,7 +1953,7 @@ tadata.message || 'No airband frequency records are deployed.';
         status(
           'Listening ' +
           (backend.frequency_hz / 1000000).toFixed(3) +
-          ' MHz AM · ADS-B paused.',
+          ' MHz ' + (backend.demodulation || 'AM') + ' · ADS-B paused.',
           true
         );
       } else if (backend.switching) {
@@ -2105,7 +2170,7 @@ tadata.message || 'No airband frequency records are deployed.';
       status(
         'Listening ' +
         stateV3.selected.frequency_mhz.toFixed(3) +
-        ' MHz AM · ADS-B paused.',
+        ' MHz ' + demodulation(stateV3.selected) + ' · ADS-B paused.',
         true
       );
 

@@ -38,6 +38,48 @@ AIRPORTS = {
     },
 }
 
+# NOAA Weather Radio broadcasts on these seven nationwide VHF channels.
+# They are pinned ahead of the distance-ranked FAA airport channels.
+NOAA_WEATHER_FREQUENCIES = [
+    162.400,
+    162.425,
+    162.450,
+    162.475,
+    162.500,
+    162.525,
+    162.550,
+]
+
+
+def build_noaa_weather_channels() -> list[dict[str, object]]:
+    channels: list[dict[str, object]] = []
+
+    for frequency in NOAA_WEATHER_FREQUENCIES:
+        channels.append(
+            {
+                "frequency_mhz": frequency,
+                "frequency_hz": int(round(frequency * 1_000_000)),
+                "category": "NOAA_WEATHER",
+                "pinned": True,
+                "demodulation": "NFM",
+                "use": "NOAA Weather Radio",
+                "airport_code": "NOAA",
+                "airport_name": "NOAA Weather Radio",
+                "facility_id": "NWR",
+                "facility_name": "NOAA Weather Radio",
+                "facility_type": "WEATHER",
+                "call": "",
+                "city": "",
+                "state": "",
+                "lat": None,
+                "lon": None,
+                "priority": 0,
+            }
+        )
+
+    return channels
+
+
 
 def normalize(value: object) -> str:
     return str(value or "").upper().strip()
@@ -116,6 +158,9 @@ def main() -> int:
             copied = dict(channel)
             copied["airport_code"] = airport_code
             copied["airport_name"] = AIRPORTS[airport_code]["display_name"]
+            copied["category"] = "AIRBAND"
+            copied["pinned"] = False
+            copied["demodulation"] = "AM"
 
             seen.add(key)
             airport_channels.append(copied)
@@ -143,6 +188,10 @@ def main() -> int:
         )
     )
 
+    airband_count = len(selected)
+    weather_channels = build_noaa_weather_channels()
+    selected = weather_channels + selected
+
     output = {
         "metadata": {
             **source.get("metadata", {}),
@@ -153,6 +202,9 @@ def main() -> int:
                 for code in args.airports
             },
             "source_record_count": len(source_channels),
+            "airband_record_count": airband_count,
+            "noaa_weather_record_count": len(weather_channels),
+            "pinned_categories": ["NOAA_WEATHER"],
             "record_count": len(selected),
         },
         "channels": selected,
@@ -174,6 +226,7 @@ def main() -> int:
             f"{AIRPORTS[airport_code]['display_name']}"
         )
     print()
+    print(f"  NOAA Weather Radio: {len(weather_channels)} pinned NFM frequencies")
     print(f"  Total deployed frequencies: {len(selected)}")
 
     return 0

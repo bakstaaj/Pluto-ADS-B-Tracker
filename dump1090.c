@@ -98,8 +98,18 @@
 #define AIRBAND_AUDIO_SAMPLE_RATE 16000
 #define AIRBAND_AUDIO_DECIMATION (MODES_DEFAULT_RATE / AIRBAND_AUDIO_SAMPLE_RATE)
 #define AIRBAND_AUDIO_RF_BANDWIDTH 200000
+#define AIRBAND_PCM_BUFFER_SECONDS 15
+#define AIRBAND_MAX_WAV_SAMPLES (AIRBAND_AUDIO_SAMPLE_RATE * 2)
 #define AIRBAND_MIN_FREQ_HZ 118000000LL
 #define AIRBAND_MAX_FREQ_HZ 136975000LL
+
+/* noaa-weather-nfm-v12: NOAA Weather Radio listening support. */
+#define AIRBAND_DEMOD_AM 0
+#define AIRBAND_DEMOD_NFM 1
+#define NOAA_WEATHER_MIN_FREQ_HZ 162400000LL
+#define NOAA_WEATHER_MAX_FREQ_HZ 162550000LL
+#define NFM_IQ_DECIMATION 25
+#define NFM_AUDIO_DECIMATION (AIRBAND_AUDIO_DECIMATION / NFM_IQ_DECIMATION)
 
 INCBIN(html,"map.html");
 /* Structure used to describe a networking client. */
@@ -158,11 +168,13 @@ struct {
 	struct iio_buffer  *rxbuf;
 	int stop;
 
-    /* Airband AM listening mode. */
+    /* Airband AM / NOAA Weather Radio NFM listening mode. */
     pthread_mutex_t airband_mutex;
     int airband_requested;
     int airband_active;
     int airband_pending;
+    int airband_requested_demod;
+    int airband_demod;
     long long airband_requested_freq;
     long long airband_freq;
     char airband_error[128];
@@ -171,10 +183,23 @@ struct {
     unsigned int airband_pcm_capacity;
     unsigned int airband_pcm_write;
     unsigned int airband_pcm_count;
+    unsigned long long airband_pcm_total;
 
+    /* AM envelope demodulator state. */
     int airband_decimation_count;
     long long airband_decimation_sum;
     double airband_dc;
+
+    /* Narrow-FM discriminator state for NOAA Weather Radio. */
+    long long nfm_i_sum;
+    long long nfm_q_sum;
+    int nfm_iq_count;
+    double nfm_prev_i;
+    double nfm_prev_q;
+    int nfm_have_previous;
+    double nfm_audio_sum;
+    int nfm_audio_count;
+    double nfm_dc;
 
     /* Networking */
 	char aneterr[ANET_ERR_LEN];
@@ -365,9 +390,11 @@ void modesInit(void) {
     Modes.airband_pending = 0;
     Modes.airband_requested_freq = MODES_DEFAULT_FREQ;
     Modes.airband_freq = MODES_DEFAULT_FREQ;
+    Modes.airband_requested_demod = AIRBAND_DEMOD_AM;
+    Modes.airband_demod = AIRBAND_DEMOD_AM;
     Modes.airband_error[0] = '\0';
 
-    Modes.airband_pcm_capacity = AIRBAND_AUDIO_SAMPLE_RATE * 5;
+    Modes.airband_pcm_capacity = AIRBAND_AUDIO_SAMPLE_RATE * AIRBAND_PCM_BUFFER_SECONDS;
     Modes.airband_pcm = calloc(Modes.airband_pcm_capacity, sizeof(int16_t));
     if (Modes.airband_pcm == NULL) {
         fprintf(stderr, "Out of memory allocating airband PCM buffer\n");
@@ -376,9 +403,19 @@ void modesInit(void) {
 
     Modes.airband_pcm_write = 0;
     Modes.airband_pcm_count = 0;
+    Modes.airband_pcm_total = 0;
     Modes.airband_decimation_count = 0;
     Modes.airband_decimation_sum = 0;
     Modes.airband_dc = 0.0;
+    Modes.nfm_i_sum = 0;
+    Modes.nfm_q_sum = 0;
+    Modes.nfm_iq_count = 0;
+    Modes.nfm_prev_i = 0.0;
+    Modes.nfm_prev_q = 0.0;
+    Modes.nfm_have_previous = 0;
+    Modes.nfm_audio_sum = 0.0;
+    Modes.nfm_audio_count = 0;
+    Modes.nfm_dc = 0.0;
 
 }
 
@@ -459,7 +496,27 @@ void modesInitPLUTOSDR(void) {
 }
 
 
-/* ========================== Airband AM listening ========================== */
+/* =============== Airband AM / NOAA Weather Radio NFM listening ============ */
+
+/*
+ * The browser supplies only published channels, but the backend still
+ * validates NOAA selections explicitly rather than accepting the entire
+ * frequency gap between civil airband and the weather-radio channels.
+ */
+static int isNoaaWeatherFrequency(long long frequency) {
+    return
+        frequency == 162400000LL ||
+        frequency == 162425000LL ||
+        frequency == 162450000LL ||
+        frequency == 162475000LL ||
+        frequency == 162500000LL ||
+        frequency == 162525000LL ||
+        frequency == 162550000LL;
+}
+
+static const char *airbandDemodulationName(int demodulation) {
+    return demodulation == AIRBAND_DEMOD_NFM ? "NFM" : "AM";
+}
 
 static int airbandTuneRadio(long long frequency, long long bandwidth) {
     struct iio_device *phy;
@@ -496,23 +553,43 @@ static int airbandTuneRadio(long long frequency, long long bandwidth) {
     return 0;
 }
 
-static void airbandResetAudio(void) {
-    pthread_mutex_lock(&Modes.airband_mutex);
-
+static void airbandResetAudioStateNoLock(void) {
     Modes.airband_pcm_write = 0;
     Modes.airband_pcm_count = 0;
+    Modes.airband_pcm_total = 0;
+
     Modes.airband_decimation_count = 0;
     Modes.airband_decimation_sum = 0;
     Modes.airband_dc = 0.0;
 
+    Modes.nfm_i_sum = 0;
+    Modes.nfm_q_sum = 0;
+    Modes.nfm_iq_count = 0;
+    Modes.nfm_prev_i = 0.0;
+    Modes.nfm_prev_q = 0.0;
+    Modes.nfm_have_previous = 0;
+    Modes.nfm_audio_sum = 0.0;
+    Modes.nfm_audio_count = 0;
+    Modes.nfm_dc = 0.0;
+}
+
+static void airbandResetAudio(void) {
+    pthread_mutex_lock(&Modes.airband_mutex);
+    airbandResetAudioStateNoLock();
     pthread_mutex_unlock(&Modes.airband_mutex);
 }
 
-static void airbandRequestMode(int enabled, long long frequency) {
+static void airbandRequestMode(
+    int enabled,
+    long long frequency,
+    int demodulation
+) {
     pthread_mutex_lock(&Modes.airband_mutex);
 
     Modes.airband_requested = enabled;
     Modes.airband_requested_freq = enabled ? frequency : MODES_DEFAULT_FREQ;
+    Modes.airband_requested_demod =
+        enabled ? demodulation : AIRBAND_DEMOD_AM;
     Modes.airband_pending = 1;
     Modes.airband_error[0] = '\0';
 
@@ -522,6 +599,7 @@ static void airbandRequestMode(int enabled, long long frequency) {
 static void airbandApplyPendingTuning(void) {
     int pending;
     int requested;
+    int requested_demodulation;
     int result;
     long long frequency;
     long long bandwidth;
@@ -530,6 +608,7 @@ static void airbandApplyPendingTuning(void) {
 
     pending = Modes.airband_pending;
     requested = Modes.airband_requested;
+    requested_demodulation = Modes.airband_requested_demod;
     frequency = Modes.airband_requested_freq;
 
     pthread_mutex_unlock(&Modes.airband_mutex);
@@ -538,6 +617,10 @@ static void airbandApplyPendingTuning(void) {
         return;
     }
 
+    /*
+     * AD9361 uses the same known-working receiver bandwidth setting for both
+     * AM airband and NOAA NFM. Demodulation differs in software below.
+     */
     bandwidth = requested ? AIRBAND_AUDIO_RF_BANDWIDTH : MODES_DEFAULT_RATE;
     result = airbandTuneRadio(frequency, bandwidth);
 
@@ -555,23 +638,22 @@ static void airbandApplyPendingTuning(void) {
     } else {
         Modes.airband_active = requested;
         Modes.airband_freq = frequency;
+        Modes.airband_demod =
+            requested ? requested_demodulation : AIRBAND_DEMOD_AM;
         Modes.airband_error[0] = '\0';
 
-        Modes.airband_pcm_write = 0;
-        Modes.airband_pcm_count = 0;
-        Modes.airband_decimation_count = 0;
-        Modes.airband_decimation_sum = 0;
-        Modes.airband_dc = 0.0;
+        airbandResetAudioStateNoLock();
     }
 
     pthread_mutex_unlock(&Modes.airband_mutex);
 }
 
-static int airbandIsActive(void) {
+static int airbandAudioMode(int *demodulation) {
     int active;
 
     pthread_mutex_lock(&Modes.airband_mutex);
     active = Modes.airband_active;
+    *demodulation = Modes.airband_demod;
     pthread_mutex_unlock(&Modes.airband_mutex);
 
     return active;
@@ -590,12 +672,32 @@ static void airbandStoreSamples(const int16_t *samples, int count) {
         if (Modes.airband_pcm_count < Modes.airband_pcm_capacity) {
             Modes.airband_pcm_count++;
         }
+
+        Modes.airband_pcm_total++;
     }
 
     pthread_mutex_unlock(&Modes.airband_mutex);
 }
 
-static void airbandDemodSample(
+static void airbandWriteAudioSample(
+    double audio,
+    int16_t *output,
+    int *output_count,
+    int output_capacity
+) {
+    if (audio > 32767.0) {
+        audio = 32767.0;
+    } else if (audio < -32768.0) {
+        audio = -32768.0;
+    }
+
+    if (*output_count < output_capacity) {
+        output[*output_count] = (int16_t)audio;
+        (*output_count)++;
+    }
+}
+
+static void airbandDemodAmSample(
     int16_t i_sample,
     int16_t q_sample,
     int16_t *output,
@@ -605,7 +707,6 @@ static void airbandDemodSample(
     int magnitude;
     double envelope;
     double audio;
-    int audio_sample;
 
     magnitude = abs((int)i_sample) + abs((int)q_sample);
 
@@ -626,26 +727,93 @@ static void airbandDemodSample(
 
     /*
      * Remove the AM carrier/DC component slowly while preserving speech.
-     * Output scaling is intentionally conservative for initial testing.
+     * Output scaling is intentionally conservative for existing airband use.
      */
     Modes.airband_dc += (envelope - Modes.airband_dc) * 0.0005;
     audio = (envelope - Modes.airband_dc) * 10.0;
 
-    if (audio > 32767.0) {
-        audio = 32767.0;
-    } else if (audio < -32768.0) {
-        audio = -32768.0;
-    }
-
-    audio_sample = (int)audio;
-
-    if (*output_count < output_capacity) {
-        output[*output_count] = (int16_t)audio_sample;
-        (*output_count)++;
-    }
+    airbandWriteAudioSample(audio, output, output_count, output_capacity);
 
     Modes.airband_decimation_sum = 0;
     Modes.airband_decimation_count = 0;
+}
+
+/*
+ * NOAA Weather Radio transmits narrowband FM. First boxcar-decimate the
+ * 2 MHz complex input to 80 kHz, then run a quadrature phase discriminator
+ * and average five discriminator values for the same ~16 kHz PCM rate used
+ * by the AM audio path.
+ */
+static void airbandDemodNfmSample(
+    int16_t i_sample,
+    int16_t q_sample,
+    int16_t *output,
+    int *output_count,
+    int output_capacity
+) {
+    double i_filtered;
+    double q_filtered;
+    double cross;
+    double dot;
+    double discriminator;
+    double audio_value;
+    double audio;
+
+    Modes.nfm_i_sum += (long long)i_sample;
+    Modes.nfm_q_sum += (long long)q_sample;
+    Modes.nfm_iq_count++;
+
+    if (Modes.nfm_iq_count < NFM_IQ_DECIMATION) {
+        return;
+    }
+
+    i_filtered = (double)Modes.nfm_i_sum / (double)Modes.nfm_iq_count;
+    q_filtered = (double)Modes.nfm_q_sum / (double)Modes.nfm_iq_count;
+
+    Modes.nfm_i_sum = 0;
+    Modes.nfm_q_sum = 0;
+    Modes.nfm_iq_count = 0;
+
+    if (!Modes.nfm_have_previous) {
+        Modes.nfm_prev_i = i_filtered;
+        Modes.nfm_prev_q = q_filtered;
+        Modes.nfm_have_previous = 1;
+        return;
+    }
+
+    cross =
+        Modes.nfm_prev_i * q_filtered -
+        Modes.nfm_prev_q * i_filtered;
+    dot =
+        Modes.nfm_prev_i * i_filtered +
+        Modes.nfm_prev_q * q_filtered;
+
+    discriminator = atan2(cross, dot);
+
+    Modes.nfm_prev_i = i_filtered;
+    Modes.nfm_prev_q = q_filtered;
+
+    Modes.nfm_audio_sum += discriminator;
+    Modes.nfm_audio_count++;
+
+    if (Modes.nfm_audio_count < NFM_AUDIO_DECIMATION) {
+        return;
+    }
+
+    audio_value =
+        Modes.nfm_audio_sum / (double)Modes.nfm_audio_count;
+
+    /*
+     * Remove residual tuning-offset DC from the FM discriminator, then
+     * scale expected weather-radio voice deviation into signed 16-bit PCM.
+     */
+    Modes.nfm_dc += (audio_value - Modes.nfm_dc) * 0.002;
+    audio = (audio_value - Modes.nfm_dc) * 70000.0;
+
+    airbandWriteAudioSample(audio, output, output_count, output_capacity);
+
+    Modes.nfm_audio_sum = 0.0;
+    Modes.nfm_audio_count = 0;
 }
 
 
@@ -734,10 +902,11 @@ void *readerThreadEntryPoint(void *arg) {
             ptrdiff_t p_inc;
             int j = 0;
             int audio_mode;
+            int audio_demodulation = AIRBAND_DEMOD_AM;
             int audio_count = 0;
 
             airbandApplyPendingTuning();
-            audio_mode = airbandIsActive();
+            audio_mode = airbandAudioMode(&audio_demodulation);
 
             iio_buffer_refill(Modes.rxbuf);
 
@@ -756,13 +925,23 @@ void *readerThreadEntryPoint(void *arg) {
                 cb_buf[j * 2 + 1] = q_sample >> 4;
 
                 if (audio_mode) {
-                    airbandDemodSample(
-                        i_sample,
-                        q_sample,
-                        audio_chunk,
-                        &audio_count,
-                        (int)(sizeof(audio_chunk) / sizeof(audio_chunk[0]))
-                    );
+                    if (audio_demodulation == AIRBAND_DEMOD_NFM) {
+                        airbandDemodNfmSample(
+                            i_sample,
+                            q_sample,
+                            audio_chunk,
+                            &audio_count,
+                            (int)(sizeof(audio_chunk) / sizeof(audio_chunk[0]))
+                        );
+                    } else {
+                        airbandDemodAmSample(
+                            i_sample,
+                            q_sample,
+                            audio_chunk,
+                            &audio_count,
+                            (int)(sizeof(audio_chunk) / sizeof(audio_chunk[0]))
+                        );
+                    }
                 }
 
                 j++;
@@ -2749,13 +2928,16 @@ static void airbandPutU32(unsigned char *buffer, unsigned int value) {
 }
 
 char *vrsAirbandStatusJson(int *len) {
-    char *out = malloc(512);
+    char *out = malloc(576);
     int requested;
     int active;
     int pending;
+    int requested_demodulation;
+    int demodulation;
     long long requested_freq;
     long long frequency;
     unsigned int pcm_count;
+    unsigned long long pcm_total;
     char error[128];
 
     if (out == NULL) {
@@ -2768,16 +2950,19 @@ char *vrsAirbandStatusJson(int *len) {
     requested = Modes.airband_requested;
     active = Modes.airband_active;
     pending = Modes.airband_pending;
+    requested_demodulation = Modes.airband_requested_demod;
+    demodulation = Modes.airband_demod;
     requested_freq = Modes.airband_requested_freq;
     frequency = Modes.airband_freq;
     pcm_count = Modes.airband_pcm_count;
+    pcm_total = Modes.airband_pcm_total;
     snprintf(error, sizeof(error), "%s", Modes.airband_error);
 
     pthread_mutex_unlock(&Modes.airband_mutex);
 
     *len = snprintf(
         out,
-        512,
+        576,
         "{"
         "\"mode\":\"%s\","
         "\"requested\":%s,"
@@ -2785,8 +2970,10 @@ char *vrsAirbandStatusJson(int *len) {
         "\"switching\":%s,"
         "\"requested_frequency_hz\":%lld,"
         "\"frequency_hz\":%lld,"
+        "\"demodulation\":\"%s\","
         "\"audio_sample_rate\":%d,"
         "\"pcm_samples\":%u,"
+        "\"pcm_total\":%llu,"
         "\"audio_url\":\"/VirtualRadar/Airband/Audio.wav\","
         "\"error\":\"%s\""
         "}\n",
@@ -2796,8 +2983,12 @@ char *vrsAirbandStatusJson(int *len) {
         pending ? "true" : "false",
         requested_freq,
         frequency,
+        airbandDemodulationName(
+            requested ? requested_demodulation : demodulation
+        ),
         AIRBAND_AUDIO_SAMPLE_RATE,
         pcm_count,
+        pcm_total,
         error
     );
 
@@ -2807,6 +2998,7 @@ char *vrsAirbandStatusJson(int *len) {
 char *vrsAirbandStartJson(const char *url, int *len) {
     const char *parameter = strstr(url, "freq=");
     long long frequency;
+    int demodulation;
 
     if (parameter == NULL) {
         char *out = strdup("{\"error\":\"Missing freq parameter\"}\n");
@@ -2816,39 +3008,104 @@ char *vrsAirbandStartJson(const char *url, int *len) {
 
     frequency = strtoll(parameter + 5, NULL, 10);
 
-    if (frequency < AIRBAND_MIN_FREQ_HZ ||
-        frequency > AIRBAND_MAX_FREQ_HZ) {
+    if (isNoaaWeatherFrequency(frequency)) {
+        demodulation = AIRBAND_DEMOD_NFM;
+    } else if (
+        frequency >= AIRBAND_MIN_FREQ_HZ &&
+        frequency <= AIRBAND_MAX_FREQ_HZ
+    ) {
+        demodulation = AIRBAND_DEMOD_AM;
+    } else {
         char *out = strdup(
-            "{\"error\":\"Frequency is outside 118.000-136.975 MHz\"}\n"
+            "{\"error\":\"Frequency is not a published airband or NOAA Weather Radio channel\"}\n"
         );
         *len = strlen(out);
         return out;
     }
 
-    airbandRequestMode(1, frequency);
+    airbandRequestMode(1, frequency, demodulation);
     return vrsAirbandStatusJson(len);
 }
 
 char *vrsAirbandStopJson(int *len) {
-    airbandRequestMode(0, MODES_DEFAULT_FREQ);
+    airbandRequestMode(0, MODES_DEFAULT_FREQ, AIRBAND_DEMOD_AM);
     return vrsAirbandStatusJson(len);
 }
 
-char *vrsAirbandAudioWav(int *len) {
+static unsigned long long airbandUrlUnsignedParameter(
+    const char *url,
+    const char *name,
+    unsigned long long fallback
+) {
+    const char *value = strstr(url, name);
+
+    if (value == NULL) {
+        return fallback;
+    }
+
+    value += strlen(name);
+    return strtoull(value, NULL, 10);
+}
+
+char *vrsAirbandAudioWav(const char *url, int *len) {
     unsigned int available;
+    unsigned int requested_samples;
     unsigned int samples;
-    unsigned int first;
+    unsigned int oldest_index;
+    unsigned int first_index;
     unsigned int index;
     unsigned int data_bytes;
     unsigned int total_bytes;
+
+    unsigned long long total_samples;
+    unsigned long long oldest_cursor;
+    unsigned long long requested_cursor;
+    unsigned long long samples_after_cursor;
+    unsigned long long offset_from_oldest;
+
     unsigned char *wav;
 
     pthread_mutex_lock(&Modes.airband_mutex);
 
     available = Modes.airband_pcm_count;
-    samples = available > AIRBAND_AUDIO_SAMPLE_RATE
-        ? AIRBAND_AUDIO_SAMPLE_RATE
-        : available;
+    total_samples = Modes.airband_pcm_total;
+    oldest_cursor = total_samples - available;
+
+    requested_samples = (unsigned int)airbandUrlUnsignedParameter(
+        url,
+        "samples=",
+        AIRBAND_AUDIO_SAMPLE_RATE
+    );
+
+    if (requested_samples == 0 ||
+        requested_samples > AIRBAND_MAX_WAV_SAMPLES) {
+        requested_samples = AIRBAND_MAX_WAV_SAMPLES;
+    }
+
+    /*
+     * Without a cursor, preserve the old behavior of returning the most
+     * recent second. The browser buffered player supplies an explicit cursor.
+     */
+    requested_cursor = airbandUrlUnsignedParameter(
+        url,
+        "from=",
+        total_samples > AIRBAND_AUDIO_SAMPLE_RATE
+            ? total_samples - AIRBAND_AUDIO_SAMPLE_RATE
+            : 0
+    );
+
+    if (requested_cursor < oldest_cursor) {
+        requested_cursor = oldest_cursor;
+    }
+
+    if (requested_cursor > total_samples) {
+        requested_cursor = total_samples;
+    }
+
+    samples_after_cursor = total_samples - requested_cursor;
+    samples = samples_after_cursor > requested_samples
+        ? requested_samples
+        : (unsigned int)samples_after_cursor;
 
     data_bytes = samples * sizeof(int16_t);
     total_bytes = 44 + data_bytes;
@@ -2874,15 +3131,22 @@ char *vrsAirbandAudioWav(int *len) {
     memcpy(wav + 36, "data", 4);
     airbandPutU32(wav + 40, data_bytes);
 
-    first = (
+    oldest_index = (
         Modes.airband_pcm_write +
         Modes.airband_pcm_capacity -
-        samples
+        available
+    ) % Modes.airband_pcm_capacity;
+
+    offset_from_oldest = requested_cursor - oldest_cursor;
+
+    first_index = (
+        oldest_index +
+        (unsigned int)offset_from_oldest
     ) % Modes.airband_pcm_capacity;
 
     for (index = 0; index < samples; index++) {
         int16_t sample =
-            Modes.airband_pcm[(first + index) % Modes.airband_pcm_capacity];
+            Modes.airband_pcm[(first_index + index) % Modes.airband_pcm_capacity];
 
         airbandPutU16(
             wav + 44 + index * 2,
@@ -3119,7 +3383,7 @@ int handleHTTPRequest(struct client *c) {
         content = vrsAirbandStopJson(&clen);
         ctype = MODES_CONTENT_TYPE_JSON;
     } else if (strstr(url, "/VirtualRadar/Airband/Audio.wav")) {
-        content = vrsAirbandAudioWav(&clen);
+        content = vrsAirbandAudioWav(url, &clen);
         ctype = MODES_CONTENT_TYPE_WAV;
     } else if (strstr(url, "/VirtualRadar/Airband/Frequencies.json")) {
         content = vrsAirbandFrequenciesJson(&clen);
