@@ -464,6 +464,15 @@ tr:hover { background: #242424; cursor: pointer; }
   cursor: default;
 }
 
+
+/* airband-buffered-audio-v4 */
+#airband-v3-buffer-status {
+  color: #ffdf4d;
+  font-size: 12px;
+  font-weight: bold;
+  margin-bottom: 5px;
+}
+
 </style>
 </head>
 <body>
@@ -521,9 +530,9 @@ tr:hover { background: #242424; cursor: pointer; }
             <div id="airband-v3-selected">Select a frequency.</div>
 
             <div id="airband-v3-audio-area">
-              <audio id="airband-v3-audio" controls preload="none"></audio>
+              <div id="airband-v3-buffer-status">Preparing audio buffer...</div>
               <div class="airband-v3-note">
-                Live AM audio uses short WAV segments. Press Play if browser autoplay is blocked.
+                Buffered live AM playback is active. Audio begins after a short startup buffer.
               </div>
             </div>
 
@@ -1625,6 +1634,14 @@ main();
     loaded: false,
     audioTimer: null,
     statusTimer: null,
+    audioContext: null,
+    audioPumpBusy: false,
+    audioNextCursor: null,
+    audioScheduledUntil: 0,
+    audioChunkSamples: 32000,
+    audioPrebufferSamples: 64000,
+    audioStartupLeadSeconds: 2.25,
+    audioQueueTargetSeconds: 6.0,
     lastReceiverKey: ''
   };
 
@@ -1876,40 +1893,74 @@ main();
     }
   }
 
-  function stopPlayer() {
-    if (stateV3.audioTimer) clearTimeout(stateV3.audioTimer);
-    if (stateV3.statusTimer) clearInterval(stateV3.statusTimer);
+  function bufferMessage(message) {
+    const output = element('airband-v3-buffer-status');
+    if (output) {
+      output.textContent = message;
+    }
+  }
 
-    const player = element('airband-v3-audio');
-    player.pause();
-    player.removeAttribute('src');
-    player.load();
+  async function createAudioContext() {
+    const AudioContextClass =
+      window.AudioContext || window.webkitAudioContext;
+
+    if (!AudioContextClass) {
+      throw new Error('This browser does not support Web Audio playback.');
+    }
+
+    if (!stateV3.audioContext) {
+      stateV3.audioContext = new AudioContextClass();
+    }
+
+    if (stateV3.audioContext.state === 'suspended') {
+      await stateV3.audioContext.resume();
+    }
+
+    stateV3.audioScheduledUntil =
+      stateV3.audioContext.currentTime + 0.15;
+  }
+
+  function stopPlayer() {
+    if (stateV3.audioTimer) {
+      clearInterval(stateV3.audioTimer);
+      stateV3.audioTimer = null;
+    }
+
+    if (stateV3.statusTimer) {
+      clearInterval(stateV3.statusTimer);
+      stateV3.statusTimer = null;
+    }
+
+    stateV3.audioNextCursor = null;
+    stateV3.audioScheduledUntil = 0;
+    stateV3.audioPumpBusy = false;
+
+    if (stateV3.audioContext) {
+      stateV3.audioContext.close().catch(function () {});
+      stateV3.audioContext = null;
+    }
 
     element('airband-v3-audio-area').classList.remove('visible');
   }
 
-  async function playAudioChunk() {
-    if (!stateV3.listening) return;
+  async function fetchBackendStatus() {
+    const response = await fetch(
+      '/VirtualRadar/Airband/Status.json?_=' + Date.now(),
+      { cache: 'no-store' }
+    );
 
-    const player = element('airband-v3-audio');
-    player.src = '/VirtualRadar/Airband/Audio.wav?_=' + Date.now();
-
-    try {
-      await player.play();
-    } catch (error) {
-      status('Listening is active. Press Play if browser autoplay is blocked.', true);
+    if (!response.ok) {
+      throw new Error('Status HTTP ' + response.status);
     }
+
+    return response.json();
   }
 
   async function pollBackend() {
     if (!stateV3.listening) return;
 
     try {
-      const response = await fetch(
-        '/VirtualRadar/Airband/Status.json?_=' + Date.now(),
-        { cache: 'no-store' }
-      );
-      const backend = await response.json();
+      const backend = await fetchBackendStatus();
 
       if (backend.error) {
         status('Backend error: ' + backend.error, true);
@@ -1922,9 +1973,187 @@ main();
           ' samples buffered.',
           true
         );
+      } else if (backend.switching) {
+        status('Switching Pluto receiver into airband mode...', true);
       }
     } catch (error) {
       status('Unable to read backend status: ' + error.message, true);
+    }
+  }
+
+  async function pumpAudio() {
+    if (!stateV3.listening ||
+        !stateV3.audioContext ||
+        stateV3.audioPumpBusy) {
+      return;
+    }
+
+    stateV3.audioPumpBusy = true;
+
+    try {
+      const backend = await fetchBackendStatus();
+
+      if (!backend.active) {
+        bufferMessage('Waiting for receiver tuning...');
+        return;
+      }
+
+      const totalSamples = Number(backend.pcm_total || 0);
+      const sampleRate = Number(backend.audio_sample_rate || 16000);
+      const chunkSamples = stateV3.audioChunkSamples;
+
+      /*
+       * Start with a four-second reserve. The Pluto+ / browser connection can
+       * occasionally take longer than real-time to complete a request, so a
+       * deeper reserve prevents playback underruns.
+       */
+      if (stateV3.audioNextCursor === null) {
+        if (totalSamples < stateV3.audioPrebufferSamples) {
+          bufferMessage(
+            'Buffering audio... ' +
+            Math.min(
+              100,
+              Math.round(totalSamples / stateV3.audioPrebufferSamples * 100)
+            ) +
+            '%'
+          );
+          return;
+        }
+
+        stateV3.audioNextCursor =
+          totalSamples - stateV3.audioPrebufferSamples;
+
+        /*
+         * Do not begin playback immediately after the first HTTP response.
+         * Hold the first block briefly so the second initial block can be
+         * downloaded, decoded and scheduled before audio reaches the speaker.
+         */
+        stateV3.audioScheduledUntil =
+          stateV3.audioContext.currentTime +
+          stateV3.audioStartupLeadSeconds;
+
+        bufferMessage('Scheduling initial playback buffer...');
+      }
+
+      /*
+       * If browser playback was suspended for several seconds, discard stale
+       * queued audio and restart from the recent buffer.
+       */
+      if (totalSamples - stateV3.audioNextCursor > sampleRate * 12) {
+        stateV3.audioNextCursor =
+          totalSamples - stateV3.audioPrebufferSamples;
+
+        /*
+         * Do not begin playback immediately after the first HTTP response.
+         * Hold the first block briefly so the second initial block can be
+         * downloaded, decoded and scheduled before audio reaches the speaker.
+         */
+        stateV3.audioScheduledUntil =
+          stateV3.audioContext.currentTime +
+          stateV3.audioStartupLeadSeconds;
+
+        bufferMessage('Scheduling initial playback buffer...');
+
+        bufferMessage('Audio connection recovered; rebuilding playback buffer...');
+      }
+
+      while (
+        stateV3.listening &&
+        totalSamples - stateV3.audioNextCursor >= chunkSamples &&
+        stateV3.audioScheduledUntil - stateV3.audioContext.currentTime <
+          stateV3.audioQueueTargetSeconds
+      ) {
+        const response = await fetch(
+          '/VirtualRadar/Airband/Audio.wav?from=' +
+          stateV3.audioNextCursor +
+          '&samples=' +
+          chunkSamples +
+          '&_=' + Date.now(),
+          { cache: 'no-store' }
+        );
+
+        if (!response.ok) {
+          throw new Error('Audio HTTP ' + response.status);
+        }
+
+        const bytes = await response.arrayBuffer();
+
+        /*
+         * airband-source-cursor-v6
+         *
+         * The Pluto cursor is measured in source PCM samples at 16 kHz.
+         * decodeAudioData() can resample the WAV into the browser output
+         * sample rate, so audioBuffer.length must not advance the Pluto
+         * source cursor.
+         *
+         * WAV is 44-byte header plus signed 16-bit mono PCM.
+         */
+        const sourceSamples = Math.max(
+          0,
+          Math.floor((bytes.byteLength - 44) / 2)
+        );
+
+        if (!sourceSamples) {
+          break;
+        }
+
+        const audioBuffer = await stateV3.audioContext.decodeAudioData(bytes);
+
+        if (!audioBuffer.length) {
+          break;
+        }
+
+        const source = stateV3.audioContext.createBufferSource();
+        source.buffer = audioBuffer;
+        source.connect(stateV3.audioContext.destination);
+
+        const startAt = Math.max(
+          stateV3.audioScheduledUntil,
+          stateV3.audioContext.currentTime + 0.05
+        );
+
+        source.start(startAt);
+
+        stateV3.audioScheduledUntil = startAt + audioBuffer.duration;
+
+        /*
+         * Advance by source samples returned by the Pluto, not browser-
+         * resampled AudioBuffer samples.
+         */
+        stateV3.audioNextCursor += sourceSamples;
+      }
+
+      const secondsQueued = Math.max(
+        0,
+        stateV3.audioScheduledUntil - stateV3.audioContext.currentTime
+      );
+
+      const playbackBeginsIn = Math.max(
+        0,
+        stateV3.audioScheduledUntil -
+        stateV3.audioContext.currentTime -
+        stateV3.audioQueueTargetSeconds
+      );
+
+      if (stateV3.audioContext.currentTime <
+          stateV3.audioScheduledUntil - stateV3.audioQueueTargetSeconds + 0.25) {
+        bufferMessage(
+          'Starting buffered audio · ' +
+          secondsQueued.toFixed(1) +
+          ' seconds scheduled'
+        );
+      } else {
+        bufferMessage(
+          'Live buffered audio · ' +
+          secondsQueued.toFixed(1) +
+          ' seconds queued'
+        );
+      }
+
+    } catch (error) {
+      bufferMessage('Audio buffering error: ' + error.message);
+    } finally {
+      stateV3.audioPumpBusy = false;
     }
   }
 
@@ -1935,31 +2164,32 @@ main();
     }
 
     try {
+      await createAudioContext();
+
       const response = await fetch(
         '/VirtualRadar/Airband/Start.json?freq=' +
         encodeURIComponent(stateV3.selected.frequency_hz) +
         '&_=' + Date.now(),
         { cache: 'no-store' }
       );
+
       const backend = await response.json();
 
       if (backend.error) {
         status('Unable to start listening: ' + backend.error, false);
+        stopPlayer();
         return;
       }
 
       stateV3.listening = true;
+      stateV3.audioNextCursor = null;
+
       element('airband-v3-listen').disabled = true;
       element('airband-v3-stop').disabled = false;
       element('airband-v3-best').disabled = true;
       element('airband-v3-audio-area').classList.add('visible');
 
-      const player = element('airband-v3-audio');
-      player.onended = function () {
-        if (stateV3.listening) {
-          stateV3.audioTimer = setTimeout(playAudioChunk, 100);
-        }
-      };
+      bufferMessage('Preparing audio buffer...');
 
       status(
         'Listening ' +
@@ -1968,11 +2198,12 @@ main();
         true
       );
 
-      stateV3.audioTimer = setTimeout(playAudioChunk, 1200);
+      stateV3.audioTimer = setInterval(pumpAudio, 75);
       stateV3.statusTimer = setInterval(pollBackend, 1000);
 
     } catch (error) {
       status('Unable to start listening: ' + error.message, false);
+      stopPlayer();
     }
   }
 
