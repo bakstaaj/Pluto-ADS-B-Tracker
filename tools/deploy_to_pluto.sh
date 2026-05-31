@@ -16,8 +16,9 @@ DEPLOY_DIR="${PLUTO_DEPLOY_DIR:-/mnt/jffs2/pluto_adsb_tracker}"
 BIN="$ROOT_DIR/dist/pluto_adsb_tracker"
 RUNTIME="$ROOT_DIR/tools/pluto_runtime.sh"
 WEB_HTML="$ROOT_DIR/web/vrs_desktop.html"
+AIRBAND_DATA="$ROOT_DIR/data/airband_frequencies.json"
 
-for required in "$BIN" "$RUNTIME" "$WEB_HTML"; do
+for required in "$BIN" "$RUNTIME" "$WEB_HTML" "$AIRBAND_DATA"; do
   if [[ ! -f "$required" ]]; then
     echo "Missing required deploy file: $required"
     exit 1
@@ -32,7 +33,6 @@ fi
 
 if [[ -z "$PLUTO_PASS" ]]; then
   echo "PLUTO_PASS is not set."
-  echo "Create $ROOT_DIR/.pluto.env or export PLUTO_PASS before running."
   exit 1
 fi
 
@@ -41,10 +41,9 @@ SSHPASS=(sshpass -p "$PLUTO_PASS")
 
 echo "== Deploying Pluto ADS-B Tracker =="
 echo "Target: ${PLUTO_USER}@${PLUTO_IP}:${DEPLOY_DIR}"
-echo
 
 "${SSHPASS[@]}" ssh "${SSH_OPTS[@]}" "${PLUTO_USER}@${PLUTO_IP}" \
-  "mkdir -p '$DEPLOY_DIR/web'"
+  "mkdir -p '$DEPLOY_DIR/web' '$DEPLOY_DIR/data'"
 
 "${SSHPASS[@]}" scp -O "${SSH_OPTS[@]}" \
   "$BIN" "${PLUTO_USER}@${PLUTO_IP}:${DEPLOY_DIR}/pluto_adsb_tracker.tmp"
@@ -55,16 +54,18 @@ echo
 "${SSHPASS[@]}" scp -O "${SSH_OPTS[@]}" \
   "$WEB_HTML" "${PLUTO_USER}@${PLUTO_IP}:${DEPLOY_DIR}/web/vrs_desktop.html.tmp"
 
+"${SSHPASS[@]}" scp -O "${SSH_OPTS[@]}" \
+  "$AIRBAND_DATA" "${PLUTO_USER}@${PLUTO_IP}:${DEPLOY_DIR}/data/airband_frequencies.json.tmp"
+
 "${SSHPASS[@]}" ssh "${SSH_OPTS[@]}" "${PLUTO_USER}@${PLUTO_IP}" "
-  chmod +x '${DEPLOY_DIR}/pluto_adsb_tracker.tmp' &&
-  chmod +x '${DEPLOY_DIR}/run_tracker.sh.tmp' &&
+  chmod +x '${DEPLOY_DIR}/pluto_adsb_tracker.tmp' '${DEPLOY_DIR}/run_tracker.sh.tmp' &&
   mv '${DEPLOY_DIR}/pluto_adsb_tracker.tmp' '${DEPLOY_DIR}/pluto_adsb_tracker' &&
   mv '${DEPLOY_DIR}/run_tracker.sh.tmp' '${DEPLOY_DIR}/run_tracker.sh' &&
   mv '${DEPLOY_DIR}/web/vrs_desktop.html.tmp' '${DEPLOY_DIR}/web/vrs_desktop.html' &&
-  ls -lh \
-    '${DEPLOY_DIR}/pluto_adsb_tracker' \
-    '${DEPLOY_DIR}/run_tracker.sh' \
-    '${DEPLOY_DIR}/web/vrs_desktop.html'
+  mv '${DEPLOY_DIR}/data/airband_frequencies.json.tmp' '${DEPLOY_DIR}/data/airband_frequencies.json' &&
+  ls -lh '${DEPLOY_DIR}/pluto_adsb_tracker' \
+         '${DEPLOY_DIR}/web/vrs_desktop.html' \
+         '${DEPLOY_DIR}/data/airband_frequencies.json'
 "
 
 echo
