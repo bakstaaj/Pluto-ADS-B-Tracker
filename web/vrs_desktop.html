@@ -722,6 +722,8 @@ const state = {
   showRangeRings: true,
   ringMaxNm: 150,
   aircraftSortMode: 'range-desc',
+  /* aircraft-freeze-during-audio-v19 */
+  aircraftRefreshPaused: false,
   config: {
     InitialLatitude: 38.75,
     InitialLongitude: -105.18,
@@ -1349,21 +1351,49 @@ function updateTable(acList) {
   }
 }
 
+/* aircraft-freeze-during-audio-v19
+ * Keep the last received aircraft on the map while the Pluto RF path is
+ * temporarily retuned away from 1090 MHz for audio monitoring.
+ */
+function setAircraftRefreshPaused(paused) {
+  state.aircraftRefreshPaused = !!paused;
+
+  if (state.aircraftRefreshPaused) {
+    const status = document.getElementById('status');
+    status.textContent = 'ADS-B paused while listening · Aircraft display frozen.';
+    return;
+  }
+
+  refresh();
+}
+
 async function refresh() {
   const status = document.getElementById('status');
+
+  if (state.aircraftRefreshPaused) {
+    return;
+  }
 
   try {
     const response = await fetch('/VirtualRadar/AircraftList.json?_=' + Date.now());
     const data = await response.json();
+
+    /* A request may have already been in flight when listening started. */
+    if (state.aircraftRefreshPaused) {
+      return;
+    }
+
     const acList = data.acList || [];
     const positioned = acList.filter(hasPosition).length;
-status.textContent =
+    status.textContent =
       `Aircraft: ${data.totalAc || acList.length} | Positioned: ${positioned} | Server: ${new Date(data.stm).toLocaleString()}`;
 
     updateMarkers(acList);
     updateTable(acList);
   } catch (e) {
-    status.textContent = 'Error loading aircraft feed: ' + e;
+    if (!state.aircraftRefreshPaused) {
+      status.textContent = 'Error loading aircraft feed: ' + e;
+    }
   }
 }
 
@@ -2139,6 +2169,11 @@ tadata.message || 'No airband frequency records are deployed.';
       return;
     }
 
+    /* aircraft-freeze-during-audio-v19: freeze before the RF mode changes. */
+    if (typeof setAircraftRefreshPaused === 'function') {
+      setAircraftRefreshPaused(true);
+    }
+
     try {
       await createAudioContext();
 
@@ -2154,6 +2189,9 @@ tadata.message || 'No airband frequency records are deployed.';
       if (backend.error) {
         status('Unable to start listening: ' + backend.error, false);
         stopPlayer();
+        if (typeof setAircraftRefreshPaused === 'function') {
+          setAircraftRefreshPaused(false);
+        }
         return;
       }
 
@@ -2180,6 +2218,9 @@ tadata.message || 'No airband frequency records are deployed.';
     } catch (error) {
       status('Unable to start listening: ' + error.message, false);
       stopPlayer();
+      if (typeof setAircraftRefreshPaused === 'function') {
+        setAircraftRefreshPaused(false);
+      }
     }
   }
 
@@ -2195,6 +2236,10 @@ tadata.message || 'No airband frequency records are deployed.';
 
     stateV3.listening = false;
     stopPlayer();
+
+    if (typeof setAircraftRefreshPaused === 'function') {
+      setAircraftRefreshPaused(false);
+    }
 
     element('airband-v3-listen').disabled = false;
     element('airband-v3-stop').disabled = true;
