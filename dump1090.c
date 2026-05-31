@@ -116,6 +116,9 @@
 #define NFM_HIGHPASS_ALPHA 0.9391        /* Approx. 160 Hz DC/rumble rejection. */
 #define NFM_AUDIO_GAIN 110000.0          /* Gain after NFM voice filtering. */
 
+/* airband-true-envelope-v20: phase-independent AM envelope detection. */
+#define AM_TRUE_ENVELOPE_GAIN 12.75     /* Match prior AM voice level without L1 detector buzz. */
+
 INCBIN(html,"map.html");
 /* Structure used to describe a networking client. */
 struct client {
@@ -718,22 +721,34 @@ static void airbandDemodAmSample(
     int *output_count,
     int output_capacity
 ) {
-    int magnitude;
+    long long magnitude_power;
     double envelope;
     double audio;
 
-    magnitude = abs((int)i_sample) + abs((int)q_sample);
+    /*
+     * airband-true-envelope-v20
+     *
+     * abs(I) + abs(Q) is a fast L1 approximation, but its output changes
+     * with carrier phase. A small tuning/oscillator offset therefore turns
+     * a steady AM carrier into an audible false tone and harmonics. Sum
+     * phase-independent I^2 + Q^2 at the 2 MHz input rate, then perform one
+     * inexpensive sqrt only when emitting each 16 kHz audio sample.
+     */
+    magnitude_power =
+        (long long)i_sample * (long long)i_sample +
+        (long long)q_sample * (long long)q_sample;
 
-    Modes.airband_decimation_sum += magnitude;
+    Modes.airband_decimation_sum += magnitude_power;
     Modes.airband_decimation_count++;
 
     if (Modes.airband_decimation_count < AIRBAND_AUDIO_DECIMATION) {
         return;
     }
 
-    envelope =
+    envelope = sqrt(
         (double)Modes.airband_decimation_sum /
-        (double)Modes.airband_decimation_count;
+        (double)Modes.airband_decimation_count
+    );
 
     if (Modes.airband_dc == 0.0) {
         Modes.airband_dc = envelope;
@@ -744,7 +759,7 @@ static void airbandDemodAmSample(
      * Output scaling is intentionally conservative for existing airband use.
      */
     Modes.airband_dc += (envelope - Modes.airband_dc) * 0.0005;
-    audio = (envelope - Modes.airband_dc) * 10.0;
+    audio = (envelope - Modes.airband_dc) * AM_TRUE_ENVELOPE_GAIN;
 
     airbandWriteAudioSample(audio, output, output_count, output_capacity);
 
