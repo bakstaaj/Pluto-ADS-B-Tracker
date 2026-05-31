@@ -557,6 +557,51 @@ tr:hover { background: #242424; cursor: pointer; }
   background: #354048;
 }
 
+
+/* airband-dblclick-cleanup-v9 */
+#airband-v3-audio-area {
+  display: none !important;
+}
+#airband-v3-table tbody tr {
+  cursor: pointer;
+}
+
+
+/* airband-inline-stop-v10 */
+#airband-v3-status-line {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-bottom: 7px;
+  min-height: 22px;
+}
+#airband-v3-status-line #airband-v3-status {
+  margin-bottom: 0;
+}
+#airband-v3-inline-stop {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 21px;
+  height: 21px;
+  padding: 0;
+  border: 1px solid #b79b32;
+  border-radius: 4px;
+  background: #28251a;
+  color: #ffdf4d;
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1;
+}
+#airband-v3-inline-stop.visible {
+  display: inline-flex;
+}
+#airband-v3-inline-stop:hover {
+  background: #393223;
+  border-color: #ffdf4d;
+}
+
 </style>
 </head>
 <body>
@@ -595,7 +640,14 @@ tr:hover { background: #242424; cursor: pointer; }
         <div id="options-panel-body">
           <section id="airband-panel-v3">
             <div class="airband-v3-title">Airband Listen</div>
-            <div id="airband-v3-status">Loading airband frequency data...</div>
+            <div id="airband-v3-status-line">
+              <span id="airband-v3-status">Loading airband frequency data...</span>
+              <button type="button"
+                      id="airband-v3-inline-stop"
+                      title="Stop listening and resume ADS-B"
+                      aria-label="Stop listening and resume ADS-B"
+                      disabled>■</button>
+            </div>
             <div id="airband-v3-source"></div>
 
             <div id="airband-v3-table-wrap">
@@ -617,7 +669,7 @@ tr:hover { background: #242424; cursor: pointer; }
               <button type="button" id="airband-v3-next">Next</button>
             </div>
 
-            <div id="airband-v3-selected">Select a frequency.</div>
+            <div id="airband-v3-selected">Select a frequency, or double-click a row to listen.</div>
 
             <div id="airband-v3-audio-area">
               <div id="airband-v3-buffer-status">Preparing audio buffer...</div>
@@ -1690,15 +1742,22 @@ tadata.message || 'No airband frequency records are deployed.';
 
   function status(message, listening) {
     const output = element('airband-v3-status');
+    const inlineStop = element('airband-v3-inline-stop');
+
     output.textContent = message;
     output.classList.toggle('listening', !!listening);
+
+    if (inlineStop) {
+      inlineStop.classList.toggle('visible', !!listening);
+      inlineStop.disabled = !listening;
+    }
   }
 
   function renderSelected() {
     const output = element('airband-v3-selected');
 
     if (!stateV3.selected) {
-      output.textContent = 'Select a frequency.';
+      output.textContent = 'Select a frequency, or double-click a row to listen.';
       return;
     }
 
@@ -1790,6 +1849,8 @@ tadata.message || 'No airband frequency records are deployed.';
       row.appendChild(useCell);
       row.appendChild(distanceCell);
 
+      row.title = 'Double-click to listen';
+
       row.addEventListener('click', function () {
         if (stateV3.listening) {
           status('Stop listening before changing frequencies.', true);
@@ -1799,6 +1860,20 @@ tadata.message || 'No airband frequency records are deployed.';
         stateV3.selected = channel;
         renderRows();
         renderSelected();
+      });
+
+      row.addEventListener('dblclick', function (event) {
+        event.preventDefault();
+
+        if (stateV3.listening) {
+          status('Stop listening before changing frequencies.', true);
+          return;
+        }
+
+        stateV3.selected = channel;
+        renderRows();
+        renderSelected();
+        beginListening();
       });
 
       rows.appendChild(row);
@@ -1862,10 +1937,11 @@ tadata.message || 'No airband frequency records are deployed.';
   }
 
   function bufferMessage(message) {
-    const output = element('airband-v3-buffer-status');
-    if (output) {
-      output.textContent = message;
-    }
+    /*
+     * Audio buffering remains internal. The user only needs the stable
+     * Listening / ADS-B paused status shown above the frequency table.
+     */
+    void message;
   }
 
   async function createAudioContext() {
@@ -1936,9 +2012,7 @@ tadata.message || 'No airband frequency records are deployed.';
         status(
           'Listening ' +
           (backend.frequency_hz / 1000000).toFixed(3) +
-          ' MHz AM · ADS-B paused · ' +
-          (backend.pcm_samples || 0) +
-          ' samples buffered.',
+          ' MHz AM · ADS-B paused.',
           true
         );
       } else if (backend.switching) {
@@ -2218,6 +2292,7 @@ tadata.message || 'No airband frequency records are deployed.';
 
     element('airband-v3-listen').addEventListener('click', beginListening);
     element('airband-v3-stop').addEventListener('click', endListening);
+    element('airband-v3-inline-stop').addEventListener('click', endListening);
 
     element('airband-v3-prev').addEventListener('click', function () {
       if (stateV3.pageIndex > 0) {
