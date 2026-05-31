@@ -111,6 +111,11 @@
 #define NFM_IQ_DECIMATION 25
 #define NFM_AUDIO_DECIMATION (AIRBAND_AUDIO_DECIMATION / NFM_IQ_DECIMATION)
 
+/* noaa-nfm-audio-tuning-v13: speech-quality filtering at 16 kHz PCM output. */
+#define NFM_DEEMPHASIS_ALPHA 0.1110      /* Approx. 300 Hz de-emphasis corner. */
+#define NFM_HIGHPASS_ALPHA 0.9391        /* Approx. 160 Hz DC/rumble rejection. */
+#define NFM_AUDIO_GAIN 110000.0          /* Gain after NFM voice filtering. */
+
 INCBIN(html,"map.html");
 /* Structure used to describe a networking client. */
 struct client {
@@ -200,6 +205,9 @@ struct {
     double nfm_audio_sum;
     int nfm_audio_count;
     double nfm_dc;
+    double nfm_deemphasis;
+    double nfm_highpass_input;
+    double nfm_highpass_output;
 
     /* Networking */
 	char aneterr[ANET_ERR_LEN];
@@ -416,6 +424,9 @@ void modesInit(void) {
     Modes.nfm_audio_sum = 0.0;
     Modes.nfm_audio_count = 0;
     Modes.nfm_dc = 0.0;
+    Modes.nfm_deemphasis = 0.0;
+    Modes.nfm_highpass_input = 0.0;
+    Modes.nfm_highpass_output = 0.0;
 
 }
 
@@ -571,6 +582,9 @@ static void airbandResetAudioStateNoLock(void) {
     Modes.nfm_audio_sum = 0.0;
     Modes.nfm_audio_count = 0;
     Modes.nfm_dc = 0.0;
+    Modes.nfm_deemphasis = 0.0;
+    Modes.nfm_highpass_input = 0.0;
+    Modes.nfm_highpass_output = 0.0;
 }
 
 static void airbandResetAudio(void) {
@@ -757,6 +771,9 @@ static void airbandDemodNfmSample(
     double dot;
     double discriminator;
     double audio_value;
+    double discriminator_audio;
+    double deemphasized;
+    double highpassed;
     double audio;
 
     Modes.nfm_i_sum += (long long)i_sample;
@@ -804,11 +821,31 @@ static void airbandDemodNfmSample(
         Modes.nfm_audio_sum / (double)Modes.nfm_audio_count;
 
     /*
-     * Remove residual tuning-offset DC from the FM discriminator, then
-     * scale expected weather-radio voice deviation into signed 16-bit PCM.
+     * Remove residual tuning-offset DC from the FM discriminator. NWR voice
+     * audio is transmitted with standard narrowband-VHF-FM pre-emphasis;
+     * complementary de-emphasis removes excess hiss/harshness and restores
+     * more natural speech balance. A gentle high-pass then removes low
+     * rumble left by oscillator drift or discriminator offset.
+     *
+     * This processing is only in the NOAA NFM path; civil airband AM audio
+     * is left unchanged.
      */
     Modes.nfm_dc += (audio_value - Modes.nfm_dc) * 0.002;
-    audio = (audio_value - Modes.nfm_dc) * 70000.0;
+    discriminator_audio = audio_value - Modes.nfm_dc;
+
+    Modes.nfm_deemphasis +=
+        (discriminator_audio - Modes.nfm_deemphasis) * NFM_DEEMPHASIS_ALPHA;
+    deemphasized = Modes.nfm_deemphasis;
+
+    highpassed = NFM_HIGHPASS_ALPHA * (
+        Modes.nfm_highpass_output +
+        deemphasized -
+        Modes.nfm_highpass_input
+    );
+    Modes.nfm_highpass_input = deemphasized;
+    Modes.nfm_highpass_output = highpassed;
+
+    audio = highpassed * NFM_AUDIO_GAIN;
 
     airbandWriteAudioSample(audio, output, output_count, output_capacity);
 
